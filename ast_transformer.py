@@ -59,7 +59,8 @@ class ASTTransformer:
         fixable = [f for f in findings if f.severity in allowed_severities]
         
         # add experimental fixes (string_concat_in_loop) if enabled
-        if experimental:
+        # only add if not already included via fix_yellow
+        if experimental and not fix_yellow:
             experimental_fixes = [f for f in findings 
                                   if f.pattern_name == 'string_concat_in_loop' 
                                   and f.severity == 'YELLOW']

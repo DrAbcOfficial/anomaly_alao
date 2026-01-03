@@ -988,7 +988,9 @@ class ASTAnalyzer:
         # expensive calls to track
         # NOTE: time_global() is NOT included because it returns different values
         # each call (current time) - caching it breaks elapsed time calculations
-        expensive_calls = {'db.actor', 'alife', 'system_ini', 'level.object_by_id',
+        # NOTE: level.object_by_id() is NOT auto-fixed because different IDs give
+        # different objects, and even same IDs can change if object is destroyed
+        expensive_calls = {'db.actor', 'alife', 'system_ini',
                            'device', 'get_console', 'get_hud'}
 
         # group by function scope
@@ -1027,24 +1029,6 @@ class ASTAnalyzer:
                         suggestion = 'local console = get_console()'
                     elif name == 'get_hud':
                         suggestion = 'local hud = get_hud()'
-                    elif name == 'level.object_by_id':
-                        # check if all calls use the same argument
-                        args_strs = []
-                        for c in calls:
-                            if c.args:
-                                args_strs.append(self._node_to_string(c.args[0]))
-                            else:
-                                args_strs.append('')
-
-                        all_same = len(set(args_strs)) == 1 and args_strs[0]
-
-                        if all_same:
-                            arg_str = args_strs[0]
-                            suggestion = f'local obj = level.object_by_id({arg_str})'
-                            severity = 'GREEN'
-                        else:
-                            suggestion = 'local obj = level.object_by_id(id)'
-                            severity = 'YELLOW'  # different args, needs review
                     else:
                         suggestion = f'Cache {name} result'
 

@@ -34,8 +34,6 @@ python stalker_lua_lint.py [path_to_mods] [options]
 # Danger Zone (do not use this)
 --clean-backups - Remove all .bak backup files
 ```
-
-
 ## Requires
 
 ```
@@ -57,8 +55,6 @@ python stalker_lua_lint.py [path_to_mods] [options]
 
 ### YELLOW (review needed)
 - String concatenation in loops (`s = s .. x`) - fixable with `--experimental`
-- Repeated `level.object_by_id()` with same argument
-
 ### RED (info only, no auto-fix)
 - Global variable writes
 

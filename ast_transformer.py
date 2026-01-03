@@ -606,10 +606,6 @@ class ASTTransformer:
             cache_line = 'local hud = get_hud()'
             new_name = 'hud'
             call_pattern = 'get_hud()'
-        elif pattern == 'repeated_level_object_by_id':
-            cache_line = suggestion if suggestion else 'local obj = level.object_by_id(id)'
-            new_name = 'obj'
-            call_pattern = 'level.object_by_id'
         else:
             return
 

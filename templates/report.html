@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}ALAO Analysis Report - {{ generated }}{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1><span class="alao-logo">ALAO</span> Analysis Report</h1>
+    <p>Generated on: {{ generated }}</p>
+</div>
+
+<div class="summary">
+    <h2>Summary</h2>
+    
+    <div class="summary-section">
+        <h4>Severity Breakdown</h4>
+        <div class="summary-stats">
+            <span class="stat green">🟢 GREEN: {{ summary.green }}</span>
+            <span class="stat yellow">🟡 YELLOW: {{ summary.yellow }}</span>
+            <span class="stat red">🔴 RED: {{ summary.red }}</span>
+            <span class="stat debug">🔵 DEBUG: {{ summary.debug }}</span>
+            <span class="stat total">TOTAL: {{ summary.total }}</span>
+        </div>
+    </div>
+    
+    <div class="summary-section">
+        <h4>Performance Impact (filtered)</h4>
+        <div class="summary-stats impact-stats">
+            <span class="stat impact-critical" id="summaryImpactCritical">CRITICAL: {{ impact.critical }}</span>
+            <span class="stat impact-high" id="summaryImpactHigh">HIGH: {{ impact.high }}</span>
+            <span class="stat impact-medium" id="summaryImpactMedium">MEDIUM: {{ impact.medium }}</span>
+            <span class="stat impact-low" id="summaryImpactLow">LOW: {{ impact.low }}</span>
+        </div>
+    </div>
+    
+    {% if top_issues %}
+    <div class="top-issues">
+        <h3 class="collapsible top-issues-header">Top Issues by Type <span class="collapse-indicator">▼</span></h3>
+        <div class="collapsible-content top-issues-content">
+            <table class="issues-table">
+                <thead>
+                    <tr>
+                        <th>Pattern</th>
+                        <th>Count</th>
+                        <th>Impact</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for pattern, count, severity, impact in top_issues %}
+                    <tr>
+                        <td>
+                            <span class="issue-severity {% if severity == 'GREEN' %}green{% elif severity == 'YELLOW' %}yellow{% elif severity == 'RED' %}red{% else %}debug{% endif %}">
+                                {% if severity == 'GREEN' %}🟢{% elif severity == 'YELLOW' %}🟡{% elif severity == 'RED' %}🔴{% else %}🔵{% endif %}
+                            </span>
+                            {{ pattern }}
+                        </td>
+                        <td class="count">{{ count }}</td>
+                        <td><span class="impact-badge impact-{{ impact }}">{{ impact|upper }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<div id="noResults" class="no-results hidden">
+    No findings match your current filters.
+</div>
+
+{% for mod_name, files in findings.items() %}
+<div class="mod-card" data-mod="{{ mod_name }}">
+    <div class="mod-header">
+        <h2 class="collapsible">{{ mod_name }}</h2>
+        <span class="mod-meta">
+            {{ files|length }} file{% if files|length != 1 %}s{% endif %}
+            <span class="mod-breakdown">
+                (🟢{{ mod_breakdowns[mod_name].GREEN }} 
+                 🟡{{ mod_breakdowns[mod_name].YELLOW }} 
+                 🔴{{ mod_breakdowns[mod_name].RED }} 
+                 🔵{{ mod_breakdowns[mod_name].DEBUG }})
+            </span>
+        </span>
+    </div>
+    
+    <div class="collapsible-content">
+        {% for file_path, file_findings in files.items() %}
+        <div class="file-section" data-file="{{ file_path }}">
+            <h3>{{ file_path|basename }}</h3>
+            
+            {% for f in file_findings %}
+            <div class="finding impact-border-{{ f.performance_impact }}" 
+                 data-severity="{{ f.severity|lower }}" 
+                 data-impact="{{ f.performance_impact }}"
+                 data-pattern="{{ f.pattern }}">
+                <div class="finding-header">
+                    <span class="line-num">L{{ f.line_num }}</span>
+                    <span class="severity-icon">
+                        {% if f.severity == 'GREEN' %}🟢{% elif f.severity == 'YELLOW' %}🟡{% elif f.severity == 'RED' %}🔴{% else %}🔵{% endif %}
+                    </span>
+                    <span class="pattern-name">{{ f.pattern }}</span>
+                </div>
+                <div class="finding-description">{{ f.description }}</div>
+                <div class="finding-impact impact-{{ f.performance_impact }}">
+                    Impact: <span class="impact-level">{{ f.performance_impact }}</span>
+                </div>
+                {% if f.line_content %}
+                <span class="code-toggle" onclick="toggleCode(this)">Show code</span>
+                <div class="code-snippet">{{ f.line_content|safe }}</div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endfor %}
+{% endblock %}

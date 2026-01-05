@@ -130,9 +130,9 @@ So feel free to apply that, as it prevents most of the CTDs caused by evil `nil`
 ## Safety measures
 
 In order to prevent loosing original scripts, make sure to backup them before applying the fixes.  
-However, as an additional protection level this tool creates `.bak` files before any changes.  
+However, as an additional protection level this tool automatically creates `.bak` files before any changes _(next to modified script files)_.  
 
-You can also use `--backup-all-scripts` flag to make the backup of all your .script files inside your mods _(keeping the folder structure, of course)_.  
+You can also use `--backup-all-scripts` flag to make the backup of all your .script files inside your mods _(keeping the folders structure, of course)_.  
 In this case there's no need to manually backup the mods folder.  
 Because ALAO only touches .script files and all of them will have a full backup now with this option.
 
@@ -142,12 +142,13 @@ Because ALAO only touches .script files and all of them will have a full backup 
 # archive will be named according to current date (ex. scripts-backup-2026-01-05_09-03-23.zip)
 python stalker_lua_lint.py /path/to/mods --backup-all-scripts
 
-# List all backups
-python stalker_lua_lint.py /path/to/mods --list-backups
-
 # Restore from backups
 python stalker_lua_lint.py /path/to/mods --revert
 
+# List all backups
+python stalker_lua_lint.py /path/to/mods --list-backups
+
+# DANGER ZONE
 # Delete backups (DO NOT USE THIS, no point removing og scripts, better keep them)
 python stalker_lua_lint.py /path/to/mods --clean-backups
 

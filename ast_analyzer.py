@@ -1131,6 +1131,7 @@ class ASTAnalyzer:
                             'lines': [c.line for c in calls],
                             'calls': calls,  # list of CallInfo with nodes
                             'scope': func_scope,
+                            'original_call': name,  # preserve original like "self.object:id()"
                         },
                         source_line=suggestion,
                     ))

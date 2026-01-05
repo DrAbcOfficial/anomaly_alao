@@ -617,21 +617,33 @@ class ASTTransformer:
             match = re.match(r'repeated_(.+)_(section|id|clsid)\(\)$', pattern)
             if not match:
                 return
-            obj_name = match.group(1)
+            sanitized_obj_name = match.group(1)
             method_name = match.group(2)
             
-            # generate cache variable name
-            if method_name == 'section':
-                new_name = f'{obj_name}_sec'
-            elif method_name == 'id':
-                new_name = f'{obj_name}_id'
-            elif method_name == 'clsid':
-                new_name = f'{obj_name}_cls'
+            # get original object name from details if available (e.g. "self.object:id()")
+            original_call = details.get('original_call', '') if details else ''
+            if original_call and ':' in original_call:
+                # extract original object name: "self.object:id()" -> "self.object"
+                real_obj_name = original_call.split(':')[0]
             else:
-                new_name = f'{obj_name}_{method_name}'
+                # fallback: try to restore dots from underscores for common patterns
+                if sanitized_obj_name.startswith('self_'):
+                    real_obj_name = 'self.' + sanitized_obj_name[5:]
+                else:
+                    real_obj_name = sanitized_obj_name
             
-            cache_line = f'local {new_name} = {obj_name}:{method_name}()'
-            call_pattern = f'{obj_name}:{method_name}()'
+            # generate cache variable name (always use sanitized for variable)
+            if method_name == 'section':
+                new_name = f'{sanitized_obj_name}_sec'
+            elif method_name == 'id':
+                new_name = f'{sanitized_obj_name}_id'
+            elif method_name == 'clsid':
+                new_name = f'{sanitized_obj_name}_cls'
+            else:
+                new_name = f'{sanitized_obj_name}_{method_name}'
+            
+            cache_line = f'local {new_name} = {real_obj_name}:{method_name}()'
+            call_pattern = f'{real_obj_name}:{method_name}()'
         else:
             return
 
@@ -658,6 +670,9 @@ class ASTTransformer:
                 return
 
             indent = self._get_indent_at_line(first_call.line)
+            
+            # is this a method cache (obj:method()) vs global cache (func())
+            is_method_cache = ':' in call_pattern
 
             # check if first call is inside a table constructor or function call arguments
             # look for unbalanced { or ( in lines before this one within scope
@@ -703,6 +718,25 @@ class ASTTransformer:
                 if paren_depth > 0:
                     return  # inside function call arguments, skip optimization
 
+                # SAFETY CHECK: detect nil-guarded method calls
+                # Pattern: "obj and obj:method()" or "if obj and ... obj:method()"
+                # These rely on short-circuit evaluation for safety - caching breaks this
+                if is_method_cache:
+                    first_ls, first_le = self._get_line_span(first_call.line)
+                    if first_ls is not None:
+                        first_line_text = self.source[first_ls:first_le]
+                        # extract object name from call_pattern: "obj:method()" -> "obj"
+                        obj_name = call_pattern.split(':')[0]
+                        
+                        # check if this line has pattern: "obj and" before "obj:method"
+                        call_pos = first_line_text.find(call_pattern)
+                        if call_pos > 0:
+                            before_call = first_line_text[:call_pos]
+                            nil_guard_pattern = rf'\b{re.escape(obj_name)}\s+and\b'
+                            if re.search(nil_guard_pattern, before_call):
+                                # object is nil-guarded, skip caching to preserve safety
+                                return
+
                 # check if calls span different blocks
                 # look for else/elseif/end between first and last call
                 last_call = calls[-1]
@@ -724,12 +758,6 @@ class ASTTransformer:
                                     has_branch_between_calls = True
                                     break
 
-                # if calls span multiple lines and first call is inside a loop OR different branches,
-                # insert at function body start instead to avoid scope issues
-                # BUT: for method caching (obj:section(), obj:id(), obj:clsid()), we can't hoist
-                # to function start because the object may not be defined there yet
-                is_method_cache = ':' in call_pattern
-                
                 if (has_loop_before_first_call or has_branch_between_calls) and last_call.line > first_call.line:
                     if is_method_cache:
                         # for method caching, skip if branches exist - too risky to hoist

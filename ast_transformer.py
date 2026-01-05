@@ -475,6 +475,15 @@ class ASTTransformer:
         if rstripped.endswith('(') or rstripped.endswith(',') or rstripped.endswith('..'):
             return
         
+        # SAFETY CHECK: don't wrap if next line also uses the same variable directly
+        # this would result in partial protection (first line guarded, second line crashes)
+        next_line_start, next_line_end = self._get_line_span(access_line + 1)
+        if next_line_start is not None:
+            next_line_text = self.source[next_line_start:next_line_end].strip()
+            # check if next line starts with VAR: (direct method call on same variable)
+            if next_line_text.startswith(f'{var_name}:'):
+                return
+        
         # determine indent from the access line
         indent = ''
         for ch in access_line_text:

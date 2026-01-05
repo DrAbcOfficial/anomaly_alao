@@ -47,6 +47,12 @@ Options:
     # DANGER ZONE
     --list-backups    List all .alao-bak backup files without restoring
     --clean-backups   Remove all .alao-bak backup files
+    
+    # DEBUG
+    --extract-debug [path]
+                       Extract all modified files (.script + .alao-bak) to a zip
+                       for debugging (default: alao_debug_extract.zip)
+    --split N          Split --extract-debug into multiple zips with N mods each
 """
 
 import sys
@@ -285,6 +291,22 @@ def main():
         help="Remove all .alao-bak backup files"
     )
     parser.add_argument(
+        "--extract-debug",
+        type=str,
+        nargs='?',
+        const='alao_debug_extract.zip',
+        default=None,
+        metavar="PATH",
+        help="Extract all modified files (.script + .alao-bak) to a zip for debugging (default: alao_debug_extract.zip)"
+    )
+    parser.add_argument(
+        "--split",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Split --extract-debug into multiple zips with N mods each (0 = no split, default)"
+    )
+    parser.add_argument(
         "--direct",
         action="store_true",
         help="Process path directly (single .script file or folder with scripts, no gamedata/scripts structure)"
@@ -463,6 +485,91 @@ def main():
 
             print(f"Restored {restored} files from backups.")
             sys.exit(0)
+
+    # handle extract-debug operation
+    if args.extract_debug:
+        import zipfile
+        
+        # group files by mod
+        files_by_mod = {}
+        for mod_name, scripts in mods.items():
+            for script_path in scripts:
+                bak_path = script_path.with_suffix(script_path.suffix + '.alao-bak')
+                if bak_path.exists():
+                    if mod_name not in files_by_mod:
+                        files_by_mod[mod_name] = []
+                    files_by_mod[mod_name].append((script_path, bak_path))
+
+        if not files_by_mod:
+            print("No modified files found (no .alao-bak backups exist).")
+            sys.exit(0)
+
+        total_files = sum(len(files) for files in files_by_mod.values())
+        total_mods = len(files_by_mod)
+        
+        zip_path = Path(args.extract_debug)
+        if not zip_path.suffix:
+            zip_path = zip_path.with_suffix('.zip')
+        
+        base_name = zip_path.stem
+        base_dir = zip_path.parent
+        
+        # determine chunks
+        mod_names = sorted(files_by_mod.keys())
+        
+        if args.split > 0:
+            # split into multiple archives
+            chunks = []
+            for i in range(0, len(mod_names), args.split):
+                chunks.append(mod_names[i:i + args.split])
+            
+            print(f"Extracting {total_files} modified files from {total_mods} mods into {len(chunks)} archives...")
+            
+            for chunk_idx, chunk_mods in enumerate(chunks, 1):
+                chunk_zip = base_dir / f"{base_name}_{chunk_idx}.zip"
+                chunk_file_count = 0
+                
+                with zipfile.ZipFile(chunk_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for mod_name in chunk_mods:
+                        for script_path, bak_path in files_by_mod[mod_name]:
+                            arcname_script = f"{mod_name}/{script_path.name}"
+                            arcname_bak = f"{mod_name}/{bak_path.name}"
+                            
+                            zf.write(script_path, arcname_script)
+                            zf.write(bak_path, arcname_bak)
+                            chunk_file_count += 1
+                            
+                            if args.verbose:
+                                print(f"  + {arcname_script}")
+                                print(f"  + {arcname_bak}")
+                
+                print(f"  [{chunk_idx}/{len(chunks)}] {chunk_zip.name}: {len(chunk_mods)} mods, {chunk_file_count} file pairs")
+            
+            print(f"\nSaved {len(chunks)} archives to: {base_dir.absolute()}")
+        else:
+            # single archive
+            print(f"Extracting {total_files} modified files to {zip_path}...")
+            
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for mod_name in mod_names:
+                    for script_path, bak_path in files_by_mod[mod_name]:
+                        arcname_script = f"{mod_name}/{script_path.name}"
+                        arcname_bak = f"{mod_name}/{bak_path.name}"
+                        
+                        zf.write(script_path, arcname_script)
+                        zf.write(bak_path, arcname_bak)
+                        
+                        if args.verbose:
+                            print(f"  + {arcname_script}")
+                            print(f"  + {arcname_bak}")
+            
+            print(f"\nExtracted {total_files} file pairs from {total_mods} mods:")
+            for mod_name in mod_names:
+                print(f"  [{mod_name}] {len(files_by_mod[mod_name])} files")
+            
+            print(f"\nSaved to: {zip_path.absolute()}")
+        
+        sys.exit(0)
 
     # analyze
     reporter = Reporter()

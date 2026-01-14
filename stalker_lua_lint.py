@@ -16,6 +16,9 @@ Options:
     --fix-nil          Fix safe nil access patterns (wrap with if-then guard)
     --remove-dead-code / --debloat
                        Remove 100% safe dead code (unreachable code, if false blocks)
+    --cache-threshold N
+                       Minimum function call count to trigger caching (default: 4)
+                       Hot callbacks use N-1. Lower = more aggressive caching.
 
     # IMPORTANT
     --backup-all-scripts [path]
@@ -83,9 +86,9 @@ def analyze_file_with_timeout(file_path: Path, timeout: float):
 
 def analyze_file_worker(args_tuple):
     """Worker function for parallel analyze_file calls."""
-    mod_name, script_path, timeout = args_tuple
+    mod_name, script_path, timeout, cache_threshold, experimental = args_tuple
     try:
-        findings = analyze_file(script_path)
+        findings = analyze_file(script_path, cache_threshold=cache_threshold, experimental=experimental)
         return (mod_name, script_path, findings, None)
     except Exception as e:
         return (mod_name, script_path, [], str(e))
@@ -214,7 +217,14 @@ def main():
     parser.add_argument(
         "--experimental",
         action="store_true",
-        help="Enable experimental fixes (string concat in loops)"
+        help="Enable experimental features: string concat in loops + branch-aware call counting (ignores mutually exclusive if/elseif branches)"
+    )
+    parser.add_argument(
+        "--cache-threshold",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Minimum function call count to trigger caching (default: 4, hot callbacks use N-1)"
     )
     parser.add_argument(
         "--backup",
@@ -637,7 +647,7 @@ def main():
 
     # prepare work items for parallel analysis
     work_items = [
-        (mod_name, script_path, args.timeout)
+        (mod_name, script_path, args.timeout, args.cache_threshold, args.experimental)
         for mod_name, script_path in all_files
     ]
 
@@ -708,7 +718,7 @@ def main():
                     f"\r[{progress:5.1f}%] {completed}/{len(all_files)} | {script_path.name[:30]:<30}", end="", flush=True)
 
             try:
-                findings = analyze_file(script_path)
+                findings = analyze_file(script_path, cache_threshold=args.cache_threshold, experimental=args.experimental)
                 files_analyzed += 1
                 if findings:
                     files_with_issues += 1

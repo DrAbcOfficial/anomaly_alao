@@ -196,6 +196,8 @@ class CallInfo:
     scope: Scope
     in_loop: bool = False
     loop_depth: int = 0
+    parent_if_node: Optional[Node] = None  # which If statement contains this call
+    branch_index: int = -1  # 0=main if, 1=elseif[0], 2=elseif[1], etc., -1=else or not in if
 
 
 @dataclass
@@ -276,7 +278,9 @@ class LocalVarInfo:
 class ASTAnalyzer:
     """AST-based Lua code analyzer."""
 
-    def __init__(self):
+    def __init__(self, cache_threshold: int = 4, experimental: bool = False):
+        self.cache_threshold = cache_threshold
+        self.experimental = experimental
         self.reset()
 
     def reset(self):
@@ -308,6 +312,10 @@ class ASTAnalyzer:
 
         self.loop_depth: int = 0
         self.function_depth: int = 0
+        
+        # if-chain tracking for experimental branch-aware counting
+        self.current_if_chain: Optional[Node] = None  # current If node
+        self.current_branch_index: int = -1  # which branch we're in
 
     def analyze_file(self, file_path: Path) -> List[Finding]:
         """Analyze a Lua file and return findings."""
@@ -743,17 +751,50 @@ class ASTAnalyzer:
 
     def _visit_If(self, node: If):
         """Handle if statement."""
+        # save previous if-chain context
+        prev_if_chain = self.current_if_chain
+        prev_branch_index = self.current_branch_index
+        
+        # set this as current if-chain
+        self.current_if_chain = node
+        
+        # visit test condition
         self._visit(node.test)
+        
+        # visit main if body (branch 0)
+        self.current_branch_index = 0
         self._visit(node.body)
+        
+        # visit elseif/else chain
         if node.orelse:
-            self._visit(node.orelse)
+            self._visit_orelse(node.orelse, 1)
+        
+        # restore previous context
+        self.current_if_chain = prev_if_chain
+        self.current_branch_index = prev_branch_index
+    
+    def _visit_orelse(self, node, branch_idx):
+        """Helper to visit elseif/else with branch tracking."""
+        if isinstance(node, ElseIf):
+            # elseif branch
+            self.current_branch_index = branch_idx
+            self._visit(node.test)
+            self._visit(node.body)
+            if node.orelse:
+                self._visit_orelse(node.orelse, branch_idx + 1)
+        elif isinstance(node, Block):
+            # else block
+            self.current_branch_index = -1  # -1 for else
+            self._visit(node)
+        else:
+            # fallback
+            self.current_branch_index = -1
+            self._visit(node)
 
     def _visit_ElseIf(self, node: ElseIf):
-        """Handle elseif clause."""
-        self._visit(node.test)
-        self._visit(node.body)
-        if node.orelse:
-            self._visit(node.orelse)
+        """Handle elseif clause - this is called from _visit_orelse."""
+        # already handled by _visit_orelse
+        pass
 
     def _visit_LocalAssign(self, node: LocalAssign):
         """Handle local assignment."""
@@ -1059,6 +1100,8 @@ class ASTAnalyzer:
                 scope=self.current_scope,
                 in_loop=self.loop_depth > 0,
                 loop_depth=self.loop_depth,
+                parent_if_node=self.current_if_chain,
+                branch_index=self.current_branch_index,
             ))
 
         # visit children
@@ -1085,6 +1128,8 @@ class ASTAnalyzer:
             scope=self.current_scope,
             in_loop=self.loop_depth > 0,
             loop_depth=self.loop_depth,
+            parent_if_node=self.current_if_chain,
+            branch_index=self.current_branch_index,
         ))
         
         # Check for potential nil access
@@ -1287,6 +1332,42 @@ class ASTAnalyzer:
     def _is_simple_expr(self, node: Node) -> bool:
         """Check if node is a simple expression (safe to repeat)."""
         return isinstance(node, (Name, Number))
+    
+    def _count_calls_branch_aware(self, calls: List[CallInfo]) -> int:
+        """
+        Count function calls with branch awareness in experimental mode.
+        
+        In mutually exclusive if/elseif/else chains, only count the max calls
+        in any single branch (not the sum across all branches).
+
+        Standard count: 3 uses
+        Branch-aware count: max(1, 2) = 2 uses (only one branch executes)
+        """
+        if not self.experimental:
+            # standard counting: total calls
+            return len(calls)
+        
+        # group calls by if-chain (use id(node) as key since nodes aren't hashable)
+        if_chains: Dict[Optional[int], Dict[int, List[CallInfo]]] = defaultdict(lambda: defaultdict(list))
+        calls_outside_if = []
+        
+        for call in calls:
+            if call.parent_if_node is not None:
+                # in an if-chain - group by (if_node_id, branch_index)
+                if_chains[id(call.parent_if_node)][call.branch_index].append(call)
+            else:
+                # not in any if statement
+                calls_outside_if.append(call)
+        
+        # count: calls outside if + max per if-chain
+        total = len(calls_outside_if)
+        
+        for if_node_id, branches in if_chains.items():
+            # take max calls across all branches in this if-chain
+            max_in_chain = max(len(branch_calls) for branch_calls in branches.values())
+            total += max_in_chain
+        
+        return total
 
     def _analyze_uncached_globals(self):
         """Find frequently used globals that should be cached."""
@@ -1322,9 +1403,11 @@ class ASTAnalyzer:
                 if not is_bare and not is_module_func:
                     continue
 
-                # threshold: 3+ uses, or 2+ if in hot callback
-                threshold = 2 if func_scope.is_hot_callback else 3
-                if len(calls) >= threshold:
+                # threshold: configurable (default 4), hot callbacks use threshold-1
+                # with --experimental, use branch-aware counting
+                threshold = self.cache_threshold - 1 if func_scope.is_hot_callback else self.cache_threshold
+                call_count = self._count_calls_branch_aware(calls)
+                if call_count >= threshold:
                     globals_to_cache[name] = calls
 
             if globals_to_cache:
@@ -1397,9 +1480,10 @@ class ASTAnalyzer:
 
         for func_scope, calls_by_name in scope_calls.items():
             for name, calls in calls_by_name.items():
-                threshold = 2 if func_scope.is_hot_callback else 3
+                threshold = self.cache_threshold - 1 if func_scope.is_hot_callback else self.cache_threshold
+                call_count = self._count_calls_branch_aware(calls)
 
-                if len(calls) >= threshold:
+                if call_count >= threshold:
                     # suggest caching
                     severity = 'GREEN'
 
@@ -1942,7 +2026,7 @@ class ASTAnalyzer:
         return ""
 
 
-def analyze_file(file_path: Path) -> List[Finding]:
+def analyze_file(file_path: Path, cache_threshold: int = 4, experimental: bool = False) -> List[Finding]:
     """Convenience function to analyze a file."""
-    analyzer = ASTAnalyzer()
+    analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
     return analyzer.analyze_file(file_path)

@@ -37,7 +37,9 @@ python stalker_lua_lint.py [path_to_mods] [options]
 --fix - Fix safe (GREEN) issues automatically
 --fix-yellow - Fix unsafe (YELLOW) issues automatically
 --fix-debug - Comment out debug statements (log, printf, print, etc.)
---experimental - Enable experimental fixes (string concat in loops)
+--experimental - Enable experimental fixes (see below for details)
+--cache-threshold - Minimum function call count to trigger caching (default: 4)
+
 --direct - Process scripts directly (searches for .script files recursively in the path or you can provide single .script path)
 --exclude "alao_exclude.txt" -- Allows to exclude certain mods from reports/fixes (you can specify any other custom .txt list)
 
@@ -47,7 +49,7 @@ python stalker_lua_lint.py [path_to_mods] [options]
 
 # Reports & Restore
 --report [file] - Generate comprehensive report (.txt, .html, .json)
---revert - Restore all .bak backup files (undo fixes)
+--revert - Restore all .alao-bak backup files (undo fixes)
 
 # Performance
 --timeout [seconds] - Timeout per file (default: 10)
@@ -58,11 +60,11 @@ python stalker_lua_lint.py [path_to_mods] [options]
 --quiet / -q - Only show summary
 
 # Backup Management
---backup / --no-backup - Create .bak files before modifying (default: True)
---list-backups - List all .bak backup files
+--backup / --no-backup - Create .alao-bak files before modifying (default: True)
+--list-backups - List all .alao-bak backup files
 
 # Danger Zone (do not use this)
---clean-backups - Remove all .bak backup files
+--clean-backups - Remove all .alao-bak backup files
 ```
 ## Requires
 
@@ -93,7 +95,9 @@ python stalker_lua_lint.py [path_to_mods] [options]
 
 ## Experimental: String Concat Fix
 
-The `--experimental` flag enables automatic transformation of string concatenation in loops:
+The `--experimental` flag enables few additional fixes/mechanisms.  
+For example, it enables branch-aware function calls counting.  
+And an automatic transformation of string concatenation in loops:
 
 **Before:**
 ```lua
@@ -130,7 +134,7 @@ So feel free to apply that, as it prevents most of the CTDs caused by evil `nil`
 ## Safety measures
 
 In order to prevent loosing original scripts, make sure to backup them before applying the fixes.  
-However, as an additional protection level this tool automatically creates `.bak` files before any changes _(next to modified script files)_.  
+However, as an additional protection level this tool automatically creates `.alao-bak` files before any changes _(next to modified script files)_.  
 
 You can also use `--backup-all-scripts` flag to make the backup of all your .script files inside your mods _(keeping the folders structure, of course)_.  
 In this case there's no need to manually backup the mods folder.  

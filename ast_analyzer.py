@@ -308,6 +308,9 @@ class ASTAnalyzer:
         self.local_vars: Dict[Tuple[int, str], LocalVarInfo] = {}  # (scope_id, name) -> info
         self.local_funcs: Dict[Tuple[int, str], LocalVarInfo] = {}  # (scope_id, name) -> info
         self.callback_registrations: Set[str] = set()  # names registered as callbacks
+        
+        # Track Name node IDs that are assignment targets (not reads)
+        self.assignment_target_ids: Set[int] = set()
 
         self.source_lines: List[str] = []
         self.source: str = ""
@@ -634,9 +637,24 @@ class ASTAnalyzer:
         line = self._get_line(node)
         func_name = node.name.id if isinstance(node.name, Name) else '<anon>'
 
-        # register function name in parent scope
+        # register function name in parent scope (before entering function scope)
         if self.current_scope:
             self.current_scope.locals.add(func_name)
+            
+            # Mark function name as assignment target
+            if isinstance(node.name, Name):
+                self.assignment_target_ids.add(id(node.name))
+                
+                # Track for unused function detection (skip _ prefixed)
+                if not func_name.startswith('_'):
+                    key = (id(self.current_scope), func_name)
+                    self.local_funcs[key] = LocalVarInfo(
+                        name=func_name,
+                        assign_line=line,
+                        scope=self.current_scope,
+                        is_read=False,
+                        is_function=True,
+                    )
 
         is_hot = func_name in HOT_CALLBACKS
 
@@ -713,7 +731,23 @@ class ASTAnalyzer:
         # loop variables are local to loop
         for target in node.targets:
             if isinstance(target, Name):
-                self.current_scope.locals.add(target.id)
+                var_name = target.id
+                self.current_scope.locals.add(var_name)
+                
+                # Mark as assignment target (not a read)
+                self.assignment_target_ids.add(id(target))
+                
+                # Track for unused variable detection (skip _ prefixed)
+                if not var_name.startswith('_'):
+                    key = (id(self.current_scope), var_name)
+                    self.local_vars[key] = LocalVarInfo(
+                        name=var_name,
+                        assign_line=line,
+                        scope=self.current_scope,
+                        is_read=False,
+                        is_function=False,
+                        is_loop_var=True,
+                    )
 
         self._visit(node.body)
 
@@ -735,7 +769,23 @@ class ASTAnalyzer:
         self._enter_scope('<fornum>', line, 'loop')
 
         if isinstance(node.target, Name):
-            self.current_scope.locals.add(node.target.id)
+            var_name = node.target.id
+            self.current_scope.locals.add(var_name)
+            
+            # Mark as assignment target (not a read)
+            self.assignment_target_ids.add(id(node.target))
+            
+            # Track for unused variable detection (skip _ prefixed)
+            if not var_name.startswith('_'):
+                key = (id(self.current_scope), var_name)
+                self.local_vars[key] = LocalVarInfo(
+                    name=var_name,
+                    assign_line=line,
+                    scope=self.current_scope,
+                    is_read=False,
+                    is_function=False,
+                    is_loop_var=True,
+                )
 
         self._visit(node.body)
 
@@ -819,10 +869,25 @@ class ASTAnalyzer:
         """Handle local assignment."""
         line = self._get_line(node)
 
-        # register targets as locals
+        # register targets as locals and track for unused variable detection
         for target in node.targets:
             if isinstance(target, Name):
-                self.current_scope.locals.add(target.id)
+                var_name = target.id
+                self.current_scope.locals.add(var_name)
+                
+                # Mark this Name node as an assignment target (not a read)
+                self.assignment_target_ids.add(id(target))
+                
+                # Track for unused variable detection (skip _ prefixed)
+                if not var_name.startswith('_'):
+                    key = (id(self.current_scope), var_name)
+                    self.local_vars[key] = LocalVarInfo(
+                        name=var_name,
+                        assign_line=line,
+                        scope=self.current_scope,
+                        is_read=False,
+                        is_function=False,
+                    )
 
         # check for caching pattern: local xyz = module.func
         if len(node.targets) == 1 and len(node.values) == 1:
@@ -861,6 +926,11 @@ class ASTAnalyzer:
     def _visit_Assign(self, node: Assign):
         """Handle assignment."""
         line = self._get_line(node)
+
+        # Mark Name targets as assignment targets (not reads)
+        for target in node.targets:
+            if isinstance(target, Name):
+                self.assignment_target_ids.add(id(target))
 
         # check for global writes
         for target in node.targets:
@@ -1138,6 +1208,12 @@ class ASTAnalyzer:
                 parent_if_node=self.current_if_chain,
                 branch_index=self.current_branch_index,
             ))
+            
+            # Track RegisterScriptCallback for unused variable/function detection
+            if full_name == 'RegisterScriptCallback' and len(node.args) >= 2:
+                callback_func = self._node_to_string(node.args[1])
+                if callback_func:
+                    self.callback_registrations.add(callback_func)
 
         # visit children
         self._visit(node.func)
@@ -1237,7 +1313,26 @@ class ASTAnalyzer:
     def _visit_ULengthOP(self, node): self._visit(node.operand)
 
     # terminal nodes - no children
-    def _visit_Name(self, node): pass
+    def _visit_Name(self, node):
+        """Handle Name node - track variable reads for unused detection."""
+        # Only count as read if NOT an assignment target
+        if id(node) not in self.assignment_target_ids:
+            var_name = node.id
+            # Find which scope this variable belongs to (walk up scope chain)
+            scope = self.current_scope
+            while scope:
+                key = (id(scope), var_name)
+                if key in self.local_vars:
+                    self.local_vars[key].is_read = True
+                    break
+                if key in self.local_funcs:
+                    self.local_funcs[key].is_read = True
+                    break
+                # Check if it's in this scope's locals (even if not tracked)
+                if var_name in scope.locals:
+                    break  # Found the scope, but might not be tracked (e.g., _ prefixed)
+                scope = scope.parent
+    
     def _visit_Number(self, node): pass
     def _visit_String(self, node): pass
     def _visit_Nil(self, node): pass
@@ -1892,163 +1987,68 @@ class ASTAnalyzer:
                     ))
 
     def _detect_unused_local_vars(self):
-        """Detect local variables that are assigned but never read (Phase 2 - warning only)."""
+        """Detect local variables that are assigned but never read (Phase 2 - warning only).
         
-        local_vars: Dict[str, LocalVarInfo] = {}
-        assignment_targets: Set[int] = set()  # ids of Name nodes that are assignment targets
-        
-        # First pass: collect all local variable assignments - O(n)
-        for node in ast.walk(self._ast_tree):
-            if isinstance(node, LocalAssign):
-                line = self._get_line(node)
-                for target in node.targets:
-                    if isinstance(target, Name):
-                        assignment_targets.add(id(target))
-                        var_name = target.id
-                        # don't track if it starts with _ (intentionally unused)
-                        if not var_name.startswith('_'):
-                            local_vars[var_name] = LocalVarInfo(
-                                name=var_name,
-                                assign_line=line,
-                                scope=self.current_scope,
-                                is_read=False,
-                                is_function=False,
-                            )
-            
-            elif isinstance(node, LocalFunction):
-                line = self._get_line(node)
-                if isinstance(node.name, Name):
-                    assignment_targets.add(id(node.name))
-                    func_name = node.name.id
-                    if not func_name.startswith('_'):
-                        local_vars[func_name] = LocalVarInfo(
-                            name=func_name,
-                            assign_line=line,
-                            scope=self.current_scope,
-                            is_read=False,
-                            is_function=True,
-                        )
-            
-            # Also track for loop variables as assigned
-            elif isinstance(node, Fornum):
-                if isinstance(node.target, Name):
-                    assignment_targets.add(id(node.target))
-                    var_name = node.target.id
-                    if not var_name.startswith('_'):
-                        local_vars[var_name] = LocalVarInfo(
-                            name=var_name,
-                            assign_line=self._get_line(node),
-                            scope=self.current_scope,
-                            is_read=False,
-                            is_function=False,
-                            is_loop_var=True,
-                        )
-            
-            elif isinstance(node, Forin):
-                if hasattr(node, 'targets'):
-                    for target in node.targets:
-                        if isinstance(target, Name):
-                            assignment_targets.add(id(target))
-                            var_name = target.id
-                            if not var_name.startswith('_'):
-                                local_vars[var_name] = LocalVarInfo(
-                                    name=var_name,
-                                    assign_line=self._get_line(node),
-                                    scope=self.current_scope,
-                                    is_read=False,
-                                    is_function=False,
-                                    is_loop_var=True,
-                                )
-        
-        # Second pass: find all reads - O(n)
-        for node in ast.walk(self._ast_tree):
-            if isinstance(node, Name):
-                # only count as read if NOT an assignment target
-                if id(node) not in assignment_targets:
-                    var_name = node.id
-                    if var_name in local_vars:
-                        local_vars[var_name].is_read = True
-            
-            # Check RegisterScriptCallback for callback registration
-            elif isinstance(node, Call):
-                func_name = self._node_to_string(node.func)
-                if func_name == 'RegisterScriptCallback' and len(node.args) >= 2:
-                    callback_func = self._node_to_string(node.args[1])
-                    if callback_func:
-                        self.callback_registrations.add(callback_func)
-        
-        # report unused locals
-        for name, info in local_vars.items():
-            if not info.is_read and not info.is_function and not info.is_loop_var:
-                # check if it's used as callback (RegisterScriptCallback)
+        Uses scope-aware tracking from the visitor pass - variables are keyed by
+        (scope_id, var_name) to correctly handle shadowing.
+        """
+        # Report unused locals from scope-aware tracking
+        for (scope_id, name), info in self.local_vars.items():
+            # Skip functions (handled separately) and loop vars
+            if info.is_function or info.is_loop_var:
+                continue
+                
+            if not info.is_read:
+                # Check if it's used as callback (RegisterScriptCallback)
                 if name in self.callback_registrations:
                     continue
+                
+                # Get scope name for better error message
+                scope_name = info.scope.name if info.scope else '<unknown>'
                 
                 self.findings.append(Finding(
                     pattern_name='unused_local_variable',
                     severity='YELLOW',  # warning only, don't auto-fix
                     line_num=info.assign_line,
-                    message=f"Local variable '{name}' is assigned but never used",
+                    message=f"Local variable '{name}' is assigned but never used in {scope_name}",
                     details={
                         'var_name': name,
                         'assign_line': info.assign_line,
+                        'scope_name': scope_name,
                         'is_safe_to_remove': False,  # not safe - might be intentional
                     },
                     source_line=self._get_source_line(info.assign_line),
                 ))
 
     def _detect_unused_local_funcs(self):
-        """Detect local functions that are never called (Phase 2 - warning only)."""
-        # Track local function definitions and calls
-        local_funcs: Dict[str, LocalVarInfo] = {}
-        called_funcs: Set[str] = set()
+        """Detect local functions that are never called (Phase 2 - warning only).
         
-        # Single pass through AST - O(n)
-        for node in ast.walk(self._ast_tree):
-            if isinstance(node, LocalFunction):
-                line = self._get_line(node)
-                if isinstance(node.name, Name):
-                    func_name = node.name.id
-                    if not func_name.startswith('_'):
-                        local_funcs[func_name] = LocalVarInfo(
-                            name=func_name,
-                            assign_line=line,
-                            scope=self.current_scope,
-                            is_read=False,
-                            is_function=True,
-                        )
-            
-            elif isinstance(node, Call):
-                func_name = self._node_to_string(node.func)
-                if func_name:
-                    called_funcs.add(func_name)
+        Uses scope-aware tracking from the visitor pass - functions are keyed by
+        (scope_id, func_name) to correctly handle shadowing.
+        """
+        # Report unused local functions from scope-aware tracking
+        for (scope_id, name), info in self.local_funcs.items():
+            if not info.is_read:
+                # Check if it's used as callback (RegisterScriptCallback)
+                if name in self.callback_registrations:
+                    continue
                 
-                # check for RegisterScriptCallback
-                if func_name == 'RegisterScriptCallback' and len(node.args) >= 2:
-                    callback_func = self._node_to_string(node.args[1])
-                    if callback_func:
-                        self.callback_registrations.add(callback_func)
-                        called_funcs.add(callback_func)
-            
-            elif isinstance(node, Name):
-                # function reference (not call)
-                called_funcs.add(node.id)
-        
-        # report unused local functions
-        for name, info in local_funcs.items():
-            if name not in called_funcs and name not in self.callback_registrations:
-                # check if it's a known callback name
+                # Check if it's a known callback name
                 if name in HOT_CALLBACKS or name in SAFE_CALLBACK_PARAMS:
                     continue
+                
+                # Get scope name for better error message
+                scope_name = info.scope.name if info.scope else '<unknown>'
                 
                 self.findings.append(Finding(
                     pattern_name='unused_local_function',
                     severity='YELLOW',  # warning only
                     line_num=info.assign_line,
-                    message=f"Local function '{name}' appears to be unused",
+                    message=f"Local function '{name}' appears to be unused in {scope_name}",
                     details={
                         'func_name': name,
                         'assign_line': info.assign_line,
+                        'scope_name': scope_name,
                         'is_safe_to_remove': False,  # not safe - might be callback
                     },
                     source_line=self._get_source_line(info.assign_line),

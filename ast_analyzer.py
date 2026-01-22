@@ -174,6 +174,9 @@ class Scope:
     # cached globals in this scope
     cached_globals: Set[str] = field(default_factory=set)
 
+    # function aliases: local_name -> canonical_name (e.g., "tinsert" -> "table.insert")
+    func_aliases: Dict[str, str] = field(default_factory=dict)
+
     def __hash__(self):
         # use object's actual id for hashing
         return id(self)
@@ -533,6 +536,8 @@ class ASTAnalyzer:
         # inherit cached globals from parent
         if self.current_scope:
             new_scope.cached_globals = set(self.current_scope.cached_globals)
+            # inherit function aliases from parent scope
+            new_scope.func_aliases = dict(self.current_scope.func_aliases)
 
         self.scopes.append(new_scope)
         self.current_scope = new_scope
@@ -552,6 +557,20 @@ class ASTAnalyzer:
                 return True
             scope = scope.parent
         return False
+
+    def _resolve_alias(self, name: str) -> Optional[str]:
+        """
+        Resolve a function alias to its canonical name.
+        
+        If 'name' is an alias for a stdlib function (e.g., 'tinsert' -> 'table.insert'),
+        returns the canonical name. Otherwise returns None.
+        """
+        scope = self.current_scope
+        while scope:
+            if name in scope.func_aliases:
+                return scope.func_aliases[name]
+            scope = scope.parent
+        return None
 
     def _visit(self, node: Node):
         """Visit a node and dispatch to specific handler."""
@@ -822,11 +841,15 @@ class ASTAnalyzer:
 
                         if module in CACHEABLE_MODULE_FUNCS:
                             self.current_scope.cached_globals.add(full_name)
+                            # Record alias mapping: target_name -> canonical function name
+                            self.current_scope.func_aliases[target_name] = full_name
 
                 # check if caching a bare global
                 elif isinstance(value, Name):
                     if value.id in CACHEABLE_BARE_GLOBALS:
                         self.current_scope.cached_globals.add(value.id)
+                        # Record alias mapping for bare globals too
+                        self.current_scope.func_aliases[target_name] = value.id
 
                 # record assignment info
                 self._record_assignment(target_name, value, line, is_local=True)
@@ -1088,6 +1111,18 @@ class ASTAnalyzer:
         """Handle function call."""
         line = self._get_line(node)
         module, func, full_name = self._get_call_name(node)
+
+        # Check if this is an aliased stdlib call
+        # e.g., if 'local tinsert = table.insert' was declared,
+        # then 'tinsert(t, v)' should be recognized as 'table.insert(t, v)'
+        if full_name and module is None:
+            # This is a bare function call - check if it's an alias
+            canonical = self._resolve_alias(full_name)
+            if canonical:
+                full_name = canonical
+                # Also update module/func if it's a module.func pattern
+                if '.' in canonical:
+                    module, func = canonical.split('.', 1)
 
         if full_name:
             self.calls.append(CallInfo(

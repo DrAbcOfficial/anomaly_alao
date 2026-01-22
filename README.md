@@ -67,6 +67,15 @@ python stalker_lua_lint.py [path_to_mods] [options]
 # Danger Zone (do not use this)
 --clean-backups - Remove all .alao-bak backup files
 ```
+
+## Is there any benchmarks?
+
+The experience differs based on your PC specs and a specific modpack.  
+In other words, if it works for me .. it doesn’t mean it will work for you.  
+However, here's a comparison I made recently:
+![Benchmark Comparison](benchmark.jpg)
+_Notice a decreased frame time and AVG FPS increase. Keep in mind this was tested on warfare mode._
+
 ## Requires
 
 ```

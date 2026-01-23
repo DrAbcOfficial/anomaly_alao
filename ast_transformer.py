@@ -788,12 +788,37 @@ class ASTTransformer:
             return
 
         # find insertion point - after function definition line
-        insert_pos = self._get_line_end(scope.start_line)
+        # also handle multi-line function definitions: function name(\n  arg1,\n  arg2)
+        func_body_start_line = scope.start_line
+        
+        func_decl_start, func_decl_end = self._get_line_span(scope.start_line)
+        if func_decl_start is not None:
+            func_decl_text = self.source[func_decl_start:func_decl_end]
+
+            # check if function definition has unclosed paren (multi-line params)
+            open_parens = func_decl_text.count('(')
+            close_parens = func_decl_text.count(')')
+            
+            if open_parens > close_parens:
+                # multi-line function definition - find closing paren
+                paren_depth = open_parens - close_parens
+                for search_line in range(scope.start_line + 1, scope.start_line + 30):  # reasonable limit
+                    search_start, search_end = self._get_line_span(search_line)
+                    if search_start is None:
+                        break
+                    search_text = self.source[search_start:search_end]
+                    paren_depth += search_text.count('(') - search_text.count(')')
+                    if paren_depth <= 0:
+                        # found the closing paren - insert after this line
+                        func_body_start_line = search_line
+                        break
+        
+        insert_pos = self._get_line_end(func_body_start_line)
         if insert_pos is None:
             return
 
-        # get indentation
-        indent = self._get_indent_at_line(scope.start_line + 1)
+        # get indentation from the actual function body (line after params)
+        indent = self._get_indent_at_line(func_body_start_line + 1)
         if not indent:
             indent = '\t'
 
@@ -967,6 +992,50 @@ class ASTTransformer:
                 # we're inside a multi-line comment, skip this optimization
                 return
             
+            # Check if first call is inside a multi-line if/elseif/while condition
+            # Pattern: "if\n  (expr with call)" - we're between keyword and then/do
+            # In this case, we can't insert a local declaration at the call's line
+            if scope and hasattr(scope, 'start_line'):
+                control_keyword_line = None
+                in_condition = False
+                
+                # scan backwards from first_call.line to find unmatched if/elseif/while
+                for check_line in range(first_call.line, scope.start_line - 1, -1):
+                    ls, le = self._get_line_span(check_line)
+                    if ls is not None:
+                        line_text = self.source[ls:le]
+                        # rem comments
+                        if '--' in line_text:
+                            line_text = line_text[:line_text.find('--')]
+                        stripped = line_text.strip().lower()
+                        
+                        # check for then/do - if found before if/while, we're NOT in a condition
+                        if stripped.endswith('then') or stripped == 'then' or ' then' in stripped:
+                            break
+                        if stripped.endswith('do') or stripped == 'do' or ' do' in stripped:
+                            break
+                        
+                        # check for if/elseif/while at the START of a line (not inside string)
+                        # these keywords without then/do on same line indicate multi-line condition
+                        if stripped.startswith(('if ', 'if(', 'elseif ', 'elseif(', 'while ', 'while(')):
+                            # check if 'then' or 'do' is on the same line
+                            if 'then' not in stripped and 'do' not in stripped:
+                                control_keyword_line = check_line
+                                in_condition = True
+                                break
+                        # bare 'if' on its own line
+                        if stripped == 'if' or stripped == 'elseif' or stripped == 'while':
+                            control_keyword_line = check_line
+                            in_condition = True
+                            break
+                
+                if in_condition and control_keyword_line is not None:
+                    # we're inside a multi-line condition - insert BEFORE the control statement
+                    insert_pos = self._get_line_start(control_keyword_line)
+                    if insert_pos is None:
+                        return
+                    indent = self._get_indent_at_line(control_keyword_line)
+            
             # is this a method cache (obj:method()) vs global cache (func())
             is_method_cache = ':' in call_pattern
 
@@ -1059,8 +1128,33 @@ class ASTTransformer:
                         # for method caching, skip if branches exist - too risky to hoist
                         return
                     
-                    # insert right after function declaration
-                    new_insert_pos = self._get_line_start(scope.start_line + 1)
+                    # Insert right after function declaration
+                    # but first, check if function definition spans multiple lines
+                    # pattern: "function name(" with arguments on following lines until ")"
+                    func_body_start_line = scope.start_line + 1
+                    
+                    func_decl_start, func_decl_end = self._get_line_span(scope.start_line)
+                    if func_decl_start is not None:
+                        func_decl_text = self.source[func_decl_start:func_decl_end]
+                        # check if function definition has unclosed paren (multi-line params)
+                        open_parens = func_decl_text.count('(')
+                        close_parens = func_decl_text.count(')')
+                        
+                        if open_parens > close_parens:
+                            # multi-line function definition - find closing paren
+                            paren_depth = open_parens - close_parens
+                            for search_line in range(scope.start_line + 1, scope.start_line + 20):  # reasonable limit
+                                search_start, search_end = self._get_line_span(search_line)
+                                if search_start is None:
+                                    break
+                                search_text = self.source[search_start:search_end]
+                                paren_depth += search_text.count('(') - search_text.count(')')
+                                if paren_depth <= 0:
+                                    # found the closing paren - insert after this line
+                                    func_body_start_line = search_line + 1
+                                    break
+                    
+                    new_insert_pos = self._get_line_start(func_body_start_line)
                     if new_insert_pos is None:
                         return
                     

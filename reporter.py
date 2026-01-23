@@ -128,6 +128,7 @@ class Reporter:
         # mod_name -> file_path -> list of findings
         self.findings: Dict[str, Dict[str, List[Finding]]] = defaultdict(lambda: defaultdict(list))
         self.start_time = datetime.now()
+        self._all_findings_cache: Optional[List[Finding]] = None
 
         # setup jinja2 if available
         self._jinja_env = None
@@ -143,14 +144,19 @@ class Reporter:
     def add_finding(self, mod_name: str, file_path: Path, finding: Finding):
         """Add a finding to the report."""
         self.findings[mod_name][str(file_path)].append(finding)
+        self._all_findings_cache = None  # invalidate cache
 
     @property
     def all_findings(self) -> List[Finding]:
-        """Get flat list of all findings."""
+        """Get flat list of all findings (cached)."""
+        if self._all_findings_cache is not None:
+            return self._all_findings_cache
+        
         result = []
         for mod in self.findings.values():
             for file_findings in mod.values():
                 result.extend(file_findings)
+        self._all_findings_cache = result
         return result
 
     def count_by_severity(self, severity: str) -> int:

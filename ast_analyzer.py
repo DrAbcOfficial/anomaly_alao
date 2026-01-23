@@ -289,12 +289,12 @@ class ASTAnalyzer:
     def reset(self):
         """Reset analyzer state for reuse."""
         # clear existing collections if they exist, otherwise create new
-        if hasattr(self, 'findings'):
+        if isinstance(getattr(self, 'findings', None), list):
             self.findings.clear()
         else:
             self.findings: List[Finding] = []
             
-        if hasattr(self, 'scopes'):
+        if isinstance(getattr(self, 'scopes', None), list):
             self.scopes.clear()
         else:
             self.scopes: List[Scope] = []
@@ -302,65 +302,65 @@ class ASTAnalyzer:
         self.current_scope: Optional[Scope] = None
         self.global_scope: Optional[Scope] = None
 
-        if hasattr(self, 'calls'):
+        if isinstance(getattr(self, 'calls', None), list):
             self.calls.clear()
         else:
             self.calls: List[CallInfo] = []
             
-        if hasattr(self, 'assigns'):
+        if isinstance(getattr(self, 'assigns', None), list):
             self.assigns.clear()
         else:
             self.assigns: List[AssignInfo] = []
             
-        if hasattr(self, 'concats'):
+        if isinstance(getattr(self, 'concats', None), list):
             self.concats.clear()
         else:
             self.concats: List[ConcatInfo] = []
             
-        if hasattr(self, 'global_writes'):
+        if isinstance(getattr(self, 'global_writes', None), list):
             self.global_writes.clear()
         else:
             self.global_writes: List[Tuple[str, int]] = []
         
         # nil access tracking
-        if hasattr(self, 'nil_sources'):
+        if isinstance(getattr(self, 'nil_sources', None), dict):
             self.nil_sources.clear()
         else:
             self.nil_sources: Dict[Tuple[int, str], NilSourceInfo] = {}
             
-        if hasattr(self, 'nil_accesses'):
+        if isinstance(getattr(self, 'nil_accesses', None), list):
             self.nil_accesses.clear()
         else:
             self.nil_accesses: List[NilAccessInfo] = []
             
-        if hasattr(self, 'nil_guards'):
+        if isinstance(getattr(self, 'nil_guards', None), set):
             self.nil_guards.clear()
         else:
             self.nil_guards: Set[Tuple[str, int]] = set()
         
         # dead code tracking
-        if hasattr(self, 'dead_code'):
+        if isinstance(getattr(self, 'dead_code', None), list):
             self.dead_code.clear()
         else:
             self.dead_code: List[DeadCodeInfo] = []
             
-        if hasattr(self, 'local_vars'):
+        if isinstance(getattr(self, 'local_vars', None), dict):
             self.local_vars.clear()
         else:
             self.local_vars: Dict[Tuple[int, str], LocalVarInfo] = {}
             
-        if hasattr(self, 'local_funcs'):
+        if isinstance(getattr(self, 'local_funcs', None), dict):
             self.local_funcs.clear()
         else:
             self.local_funcs: Dict[Tuple[int, str], LocalVarInfo] = {}
             
-        if hasattr(self, 'callback_registrations'):
+        if isinstance(getattr(self, 'callback_registrations', None), set):
             self.callback_registrations.clear()
         else:
             self.callback_registrations: Set[str] = set()
         
         # track Name node IDs that are assignment targets (not reads)
-        if hasattr(self, 'assignment_target_ids'):
+        if isinstance(getattr(self, 'assignment_target_ids', None), set):
             self.assignment_target_ids.clear()
         else:
             self.assignment_target_ids: Set[int] = set()

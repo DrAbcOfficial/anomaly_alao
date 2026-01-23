@@ -65,17 +65,15 @@ def discover_mods(root_path: Path) -> Dict[str, List[Path]]:
 
 def find_scripts(scripts_dir: Path) -> List[Path]:
     """Find all Lua script files in a directory."""
-    scripts = []
+    scripts = set()
 
-    # .lua and .script are both used
+    # .lua and .script are both used - glob root level first
     for ext in ("*.lua", "*.script"):
-        scripts.extend(scripts_dir.glob(ext))
+        scripts.update(scripts_dir.glob(ext))
 
     # also check subdirectories (some mods organize scripts in folders)
     for ext in ("**/*.lua", "**/*.script"):
-        for f in scripts_dir.glob(ext):
-            if f not in scripts:
-                scripts.append(f)
+        scripts.update(scripts_dir.glob(ext))
 
     return sorted(scripts)
 
@@ -134,15 +132,13 @@ def discover_direct(path: Path) -> Dict[str, List[Path]]:
             mods["(direct)"] = [path]
         return mods
     
-    # directory - find all scripts
+    # directory - find all scripts using set
     if path.is_dir():
-        scripts = []
+        scripts = set()
         for ext in ("*.lua", "*.script"):
-            scripts.extend(path.glob(ext))
+            scripts.update(path.glob(ext))
         for ext in ("**/*.lua", "**/*.script"):
-            for f in path.glob(ext):
-                if f not in scripts:
-                    scripts.append(f)
+            scripts.update(path.glob(ext))
         
         if scripts:
             mods["(direct)"] = sorted(scripts)

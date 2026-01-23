@@ -116,36 +116,47 @@ class WholeProgramAnalyzer:
         self.analysis = CrossFileAnalysis()
         self.files_analyzed: Set[Path] = set()
         self.parse_errors: List[Tuple[Path, str]] = []
+        self._ast_cache: Dict[Path, Tuple[Optional[Chunk], str]] = {}  # path -> (tree, source)
     
     def analyze_directory(self, directory: Path, recursive: bool = True) -> CrossFileAnalysis:
         """Analyze all .script files in a directory."""
         pattern = '**/*.script' if recursive else '*.script'
         script_files = list(directory.glob(pattern))
-        
-        # Pass 1: Collect all definitions
-        for script_path in script_files:
-            self._collect_definitions(script_path)
-        
-        # Pass 2: Collect all usages
-        for script_path in script_files:
-            self._collect_usages(script_path)
-        
-        return self.analysis
+        return self._analyze_files_impl(script_files)
     
     def analyze_files(self, files: List[Path]) -> CrossFileAnalysis:
         """Analyze a specific list of files."""
-        # Pass 1: Collect all definitions
+        return self._analyze_files_impl(files)
+    
+    def _analyze_files_impl(self, files: List[Path]) -> CrossFileAnalysis:
+        """Internal implementation that parses once and runs both passes."""
+        # parse all files once and cache
         for script_path in files:
-            self._collect_definitions(script_path)
+            self._ensure_parsed(script_path)
         
-        # Pass 2: Collect all usages
+        # pass 1: collect all definitions
         for script_path in files:
-            self._collect_usages(script_path)
+            cached = self._ast_cache.get(script_path)
+            if cached and cached[0]:
+                self.files_analyzed.add(script_path)
+                self._visit_for_definitions(cached[0], script_path)
+        
+        # pass 2: collect all usages
+        for script_path in files:
+            cached = self._ast_cache.get(script_path)
+            if cached and cached[0]:
+                self._visit_for_usages(cached[0], script_path)
+        
+        # clear cache to free memory
+        self._ast_cache.clear()
         
         return self.analysis
     
-    def _parse_file(self, file_path: Path) -> Optional[Chunk]:
-        """Parse a Lua file, returning None on error."""
+    def _ensure_parsed(self, file_path: Path):
+        """Parse file and cache result."""
+        if file_path in self._ast_cache:
+            return
+        
         try:
             source = file_path.read_text(encoding='utf-8', errors='ignore')
             old_stderr = sys.stderr
@@ -154,28 +165,10 @@ class WholeProgramAnalyzer:
                 tree = ast.parse(source)
             finally:
                 sys.stderr = old_stderr
-            return tree
+            self._ast_cache[file_path] = (tree, source)
         except Exception as e:
             self.parse_errors.append((file_path, str(e)))
-            return None
-    
-    def _collect_definitions(self, file_path: Path):
-        """Pass 1: Collect all symbol definitions from a file."""
-        tree = self._parse_file(file_path)
-        if not tree:
-            return
-        
-        self.files_analyzed.add(file_path)
-        self._visit_for_definitions(tree, file_path)
-    
-    def _collect_usages(self, file_path: Path):
-        """Pass 2: Collect all symbol usages from a file."""
-        tree = self._parse_file(file_path)
-        if not tree:
-            return
-        
-        source = file_path.read_text(encoding='utf-8', errors='ignore')
-        self._visit_for_usages(tree, file_path, source)
+            self._ast_cache[file_path] = (None, "")
     
     def _get_line(self, node: Node) -> int:
         """Extract line number from node."""
@@ -337,12 +330,12 @@ class WholeProgramAnalyzer:
             if child is not node:
                 self._visit_for_definitions(child, file_path, in_local_scope)
     
-    def _visit_for_usages(self, node: Node, file_path: Path, source: str):
-        """Visit AST to collect usages."""
+    def _visit_for_usages(self, node: Node, file_path: Path):
+        """Visit AST to collect usages (recursively)."""
         if node is None:
             return
         
-        # Function call: name() or module.name()
+        # function call: name() or module.name()
         if isinstance(node, Call):
             func_name = self._node_to_string(node.func)
             line = self._get_line(node)
@@ -355,7 +348,7 @@ class WholeProgramAnalyzer:
                     usage_type='call',
                 ))
             
-            # Check for RegisterScriptCallback("name", func)
+            # check for RegisterScriptCallback("name", func)
             if func_name == 'RegisterScriptCallback' and len(node.args) >= 2:
                 callback_name = self._node_to_string(node.args[0])
                 callback_func = self._node_to_string(node.args[1])
@@ -371,23 +364,22 @@ class WholeProgramAnalyzer:
                         usage_type='callback_register',
                     ))
         
-        # Method call: obj:method()
+        # method call: obj:method()
         elif isinstance(node, Invoke):
-            source_name = self._node_to_string(node.source)
+            obj_name = self._node_to_string(node.source)
             method_name = node.func.id if isinstance(node.func, Name) else ""
-            full_name = f"{source_name}:{method_name}"
             line = self._get_line(node)
             
-            # Track usage of the object
-            if source_name:
-                self.analysis.usages[source_name].append(SymbolUsage(
-                    name=source_name,
+            # track usage of the object
+            if obj_name:
+                self.analysis.usages[obj_name].append(SymbolUsage(
+                    name=obj_name,
                     file_path=file_path,
                     line=line,
                     usage_type='read',
                 ))
         
-        # Variable read: name
+        # variable read: name
         elif isinstance(node, Name):
             name = node.id
             line = self._get_line(node)
@@ -399,7 +391,7 @@ class WholeProgramAnalyzer:
                 usage_type='read',
             ))
         
-        # Index read: module.name or module["name"]
+        # index read: module.name or module["name"]
         elif isinstance(node, Index):
             full_name = self._node_to_string(node)
             line = self._get_line(node)
@@ -411,6 +403,11 @@ class WholeProgramAnalyzer:
                     line=line,
                     usage_type='read',
                 ))
+        
+        # recurse into all children
+        for child in ast.walk(node):
+            if child is not node:
+                self._visit_for_usages(child, file_path)
 
 
 def analyze_mods_directory(mods_path: Path) -> CrossFileAnalysis:

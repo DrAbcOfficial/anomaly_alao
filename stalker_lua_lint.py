@@ -76,10 +76,10 @@ from reporter import Reporter
 from models import Finding
 
 
-def analyze_file_with_timeout(file_path: Path, timeout: float):
+def analyze_file_with_timeout(file_path: Path, timeout: float, cache_threshold: int = 4, experimental: bool = False):
     """Analyze a file with a timeout to prevent hanging on problematic files."""
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(analyze_file, file_path)
+        future = executor.submit(analyze_file, file_path, cache_threshold=cache_threshold, experimental=experimental)
         try:
             return future.result(timeout=timeout)
         except FuturesTimeoutError:
@@ -90,8 +90,13 @@ def analyze_file_worker(args_tuple):
     """Worker function for parallel analyze_file calls."""
     mod_name, script_path, timeout, cache_threshold, experimental = args_tuple
     try:
-        findings = analyze_file(script_path, cache_threshold=cache_threshold, experimental=experimental)
+        if timeout and timeout > 0:
+            findings = analyze_file_with_timeout(script_path, timeout, cache_threshold, experimental)
+        else:
+            findings = analyze_file(script_path, cache_threshold=cache_threshold, experimental=experimental)
         return (mod_name, script_path, findings, None)
+    except TimeoutError as e:
+        return (mod_name, script_path, [], f"TimeoutError: {e}")
     except Exception as e:
         err_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         return (mod_name, script_path, [], err_msg)
@@ -229,7 +234,7 @@ def main():
         type=int,
         default=4,
         metavar="N",
-        help="Minimum function call count to trigger caching (default: 4, hot callbacks use N-1)"
+        help="Minimum function call count to trigger caching (default: 4, hot callbacks use N-1, min: 2)"
     )
     parser.add_argument(
         "--backup",
@@ -334,6 +339,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # validate cache-threshold
+    if args.cache_threshold < 2:
+        print(f"Warning: Invalid cache threshold ({args.cache_threshold}), using minimum value of 2")
+        args.cache_threshold = 2
 
     # try get path interactively if not provided
     if args.path:
@@ -675,6 +685,7 @@ def main():
 
     completed = 0
     pool_crashed = False
+    interrupted = False
     processed_paths = set()  # track which files were processed
 
     try:
@@ -700,15 +711,17 @@ def main():
                     continue
 
                 if not args.quiet:
-                    progress = completed / len(all_files) * 100
+                    total = len(all_files)
+                    progress = (completed / total * 100) if total > 0 else 100
                     elapsed = (datetime.now() - start_time).total_seconds()
-                    rate = completed / elapsed if elapsed > 0 else 0
-                    eta = (len(all_files) - completed) / rate if rate > 0 else 0
+                    rate = completed / elapsed if elapsed > 0.01 else 0
+                    remaining = total - completed
+                    eta = remaining / rate if rate > 0 and remaining > 0 else 0
                     print(
-                        f"\r[{progress:5.1f}%] {completed}/{len(all_files)} | ETA: {eta:.0f}s  ", end="", flush=True)
+                        f"\r[{progress:5.1f}%] {completed}/{total} | ETA: {eta:.0f}s  ", end="", flush=True)
 
                 if error:
-                    if 'SyntaxError' in error or 'parse' in error.lower():
+                    if 'SyntaxError' in error or 'parse' in error.lower() or 'TimeoutError' in error:
                         parse_errors += 1
                         if args.verbose:
                             print(f"\n  [PARSE ERROR] {script_path.name}")
@@ -727,8 +740,15 @@ def main():
                             print(f"\n  [{len(findings):3d} issues] {script_path.name}")
     except BrokenExecutor:
         pool_crashed = True
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n\nInterrupted! Finishing current tasks...")
 
-    if pool_crashed:
+    if interrupted:
+        print(f"Processed {completed}/{len(all_files)} files before interruption.")
+        # continue to show partial results
+
+    if pool_crashed and not interrupted:
         if not args.quiet:
             print(f"\n\nWorker crashed. Falling back to single-threaded mode...")
 
@@ -831,6 +851,7 @@ def main():
         else:
             completed = 0
             pool_crashed = False
+            transform_interrupted = False
             processed_paths = set()
 
             try:
@@ -843,7 +864,7 @@ def main():
                     for future in as_completed(futures):
                         completed += 1
                         if not args.quiet:
-                            progress = completed / len(work_items) * 100
+                            progress = (completed / len(work_items) * 100) if work_items else 100
                             print(
                                 f"\r[{progress:5.1f}%] Fixing {completed}/{len(work_items)}...", end="", flush=True)
 
@@ -868,8 +889,11 @@ def main():
                                 print(f"\n  [FIXED] {script_path.name} ({edit_count} edits)")
             except BrokenExecutor:
                 pool_crashed = True
+            except KeyboardInterrupt:
+                transform_interrupted = True
+                print("\n\nInterrupted during fixes! Some files may have been modified.")
 
-            if pool_crashed:
+            if pool_crashed and not transform_interrupted:
                 if not args.quiet:
                     print(f"\n\nWorker crashed. Falling back to single-threaded mode...")
 
@@ -880,7 +904,7 @@ def main():
                     script_path = item[0]
                     completed += 1
                     if not args.quiet:
-                        progress = completed / len(work_items) * 100
+                        progress = (completed / len(work_items) * 100) if work_items else 100
                         print(
                             f"\r[{progress:5.1f}%] Fixing {completed}/{len(work_items)}...", end="", flush=True)
 

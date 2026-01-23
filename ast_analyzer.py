@@ -405,10 +405,20 @@ class ASTAnalyzer:
             s = node.s
             if isinstance(s, bytes):
                 s = s.decode('utf-8', errors='replace')
-            # use single quotes if string contains double quotes
-            if '"' in s and "'" not in s:
-                return f"'{s}'"
-            return f'"{s}"'
+            # Escape special characters for Lua string literal
+            # Must re-escape because luaparser stores decoded values
+            escaped = s.replace('\\', '\\\\')  # backslash first!
+            escaped = escaped.replace('\n', '\\n')
+            escaped = escaped.replace('\r', '\\r')
+            escaped = escaped.replace('\t', '\\t')
+            escaped = escaped.replace('\0', '\\0')
+            # Choose quote style and escape the chosen quote
+            if '"' in escaped and "'" not in escaped:
+                escaped = escaped.replace("'", "\\'")
+                return f"'{escaped}'"
+            else:
+                escaped = escaped.replace('"', '\\"')
+                return f'"{escaped}"'
         elif isinstance(node, (TrueExpr,)):
             return "true"
         elif isinstance(node, (FalseExpr,)):

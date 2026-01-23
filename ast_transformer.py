@@ -30,6 +30,14 @@ class ASTTransformer:
         self.edits: List[SourceEdit] = []
         self.file_path: Optional[Path] = None
         self.analyzer: Optional[ASTAnalyzer] = None
+        self._line_offsets: List[int] = []  # cached line start offsets
+
+    def _compute_line_offsets(self):
+        """Compute and cache line start offsets for efficient lookups."""
+        self._line_offsets = [0]
+        for i, char in enumerate(self.source):
+            if char == '\n':
+                self._line_offsets.append(i + 1)
 
     def transform_file(self, file_path: Path, backup: bool = True, dry_run: bool = False,
                        fix_debug: bool = False, fix_yellow: bool = False,
@@ -55,8 +63,9 @@ class ASTTransformer:
         self.analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
         findings = self.analyzer.analyze_file(file_path)
 
-        # get source from analyzer
+        # get source from analyzer and compute line offsets
         self.source = self.analyzer.source
+        self._compute_line_offsets()
 
         # filter to fixable severities
         allowed_severities = {'GREEN'}
@@ -1475,42 +1484,50 @@ class ASTTransformer:
 
     def _get_line_span(self, line_num: int) -> Tuple[Optional[int], Optional[int]]:
         """Get character span for a line (1-indexed), including newline."""
-        lines = self.source.split('\n')
-        if line_num < 1 or line_num > len(lines):
+        if line_num < 1 or line_num > len(self._line_offsets):
             return None, None
 
-        start = sum(len(l) + 1 for l in lines[:line_num - 1])
-        end = start + len(lines[line_num - 1])
-
-        # include newline if not last line
-        if line_num < len(lines):
-            end += 1
+        start = self._line_offsets[line_num - 1]
+        
+        # end is start of next line, or end of source
+        if line_num < len(self._line_offsets):
+            end = self._line_offsets[line_num]
+        else:
+            end = len(self.source)
 
         return start, end
 
     def _get_line_start(self, line_num: int) -> Optional[int]:
         """Get character position of line start."""
-        start, _ = self._get_line_span(line_num)
-        return start
+        if line_num < 1 or line_num > len(self._line_offsets):
+            return None
+        return self._line_offsets[line_num - 1]
 
     def _get_line_end(self, line_num: int) -> Optional[int]:
         """Get character position of line end (before newline)."""
-        lines = self.source.split('\n')
-        if line_num < 1 or line_num > len(lines):
+        if line_num < 1 or line_num > len(self._line_offsets):
             return None
 
-        pos = sum(len(l) + 1 for l in lines[:line_num - 1])
-        pos += len(lines[line_num - 1])
-        return pos
+        start = self._line_offsets[line_num - 1]
+        
+        # find end of content (before newline)
+        if line_num < len(self._line_offsets):
+            # next line starts after newline, so content ends at offset - 1
+            end = self._line_offsets[line_num] - 1
+        else:
+            end = len(self.source)
+        
+        return end
 
     def _get_indent_at_line(self, line_num: int) -> str:
         """Get indentation at a line."""
-        lines = self.source.split('\n')
-        if 0 < line_num <= len(lines):
-            line = lines[line_num - 1]
-            stripped = line.lstrip()
-            return line[:len(line) - len(stripped)]
-        return ''
+        start, end = self._get_line_span(line_num)
+        if start is None:
+            return ''
+        
+        line = self.source[start:end].rstrip('\n\r')
+        stripped = line.lstrip()
+        return line[:len(line) - len(stripped)]
 
     def _apply_edits(self) -> str:
         """Apply all edits and return new source."""

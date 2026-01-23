@@ -287,30 +287,83 @@ class ASTAnalyzer:
         self.reset()
 
     def reset(self):
-        """Reset analyzer state."""
-        self.findings: List[Finding] = []
-        self.scopes: List[Scope] = []
+        """Reset analyzer state for reuse."""
+        # clear existing collections if they exist, otherwise create new
+        if hasattr(self, 'findings'):
+            self.findings.clear()
+        else:
+            self.findings: List[Finding] = []
+            
+        if hasattr(self, 'scopes'):
+            self.scopes.clear()
+        else:
+            self.scopes: List[Scope] = []
+            
         self.current_scope: Optional[Scope] = None
         self.global_scope: Optional[Scope] = None
 
-        self.calls: List[CallInfo] = []
-        self.assigns: List[AssignInfo] = []
-        self.concats: List[ConcatInfo] = []
-        self.global_writes: List[Tuple[str, int]] = []
+        if hasattr(self, 'calls'):
+            self.calls.clear()
+        else:
+            self.calls: List[CallInfo] = []
+            
+        if hasattr(self, 'assigns'):
+            self.assigns.clear()
+        else:
+            self.assigns: List[AssignInfo] = []
+            
+        if hasattr(self, 'concats'):
+            self.concats.clear()
+        else:
+            self.concats: List[ConcatInfo] = []
+            
+        if hasattr(self, 'global_writes'):
+            self.global_writes.clear()
+        else:
+            self.global_writes: List[Tuple[str, int]] = []
         
         # nil access tracking
-        self.nil_sources: Dict[Tuple[int, str], NilSourceInfo] = {}  # (scope_id, var_name) -> nil source info
-        self.nil_accesses: List[NilAccessInfo] = []      # potential nil accesses
-        self.nil_guards: Set[Tuple[str, int]] = set()    # (var_name, line) pairs where nil check exists
+        if hasattr(self, 'nil_sources'):
+            self.nil_sources.clear()
+        else:
+            self.nil_sources: Dict[Tuple[int, str], NilSourceInfo] = {}
+            
+        if hasattr(self, 'nil_accesses'):
+            self.nil_accesses.clear()
+        else:
+            self.nil_accesses: List[NilAccessInfo] = []
+            
+        if hasattr(self, 'nil_guards'):
+            self.nil_guards.clear()
+        else:
+            self.nil_guards: Set[Tuple[str, int]] = set()
         
         # dead code tracking
-        self.dead_code: List[DeadCodeInfo] = []
-        self.local_vars: Dict[Tuple[int, str], LocalVarInfo] = {}  # (scope_id, name) -> info
-        self.local_funcs: Dict[Tuple[int, str], LocalVarInfo] = {}  # (scope_id, name) -> info
-        self.callback_registrations: Set[str] = set()  # names registered as callbacks
+        if hasattr(self, 'dead_code'):
+            self.dead_code.clear()
+        else:
+            self.dead_code: List[DeadCodeInfo] = []
+            
+        if hasattr(self, 'local_vars'):
+            self.local_vars.clear()
+        else:
+            self.local_vars: Dict[Tuple[int, str], LocalVarInfo] = {}
+            
+        if hasattr(self, 'local_funcs'):
+            self.local_funcs.clear()
+        else:
+            self.local_funcs: Dict[Tuple[int, str], LocalVarInfo] = {}
+            
+        if hasattr(self, 'callback_registrations'):
+            self.callback_registrations.clear()
+        else:
+            self.callback_registrations: Set[str] = set()
         
-        # Track Name node IDs that are assignment targets (not reads)
-        self.assignment_target_ids: Set[int] = set()
+        # track Name node IDs that are assignment targets (not reads)
+        if hasattr(self, 'assignment_target_ids'):
+            self.assignment_target_ids.clear()
+        else:
+            self.assignment_target_ids: Set[int] = set()
 
         self.source_lines: List[str] = []
         self.source: str = ""
@@ -320,8 +373,8 @@ class ASTAnalyzer:
         self.function_depth: int = 0
         
         # if-chain tracking for experimental branch-aware counting
-        self.current_if_chain: Optional[Node] = None  # current If node
-        self.current_branch_index: int = -1  # which branch we're in
+        self.current_if_chain: Optional[Node] = None
+        self.current_branch_index: int = -1
 
     def analyze_file(self, file_path: Path) -> List[Finding]:
         """Analyze a Lua file and return findings."""
@@ -1172,8 +1225,26 @@ class ASTAnalyzer:
 
     def _has_nil_guard(self, var_name: str, assign_line: int, access_line: int) -> bool:
         """Check if there's a nil guard between assignment and access."""
+        import re
+        
         if assign_line >= access_line:
             return False
+        
+        # escape var name for regex
+        var_escaped = re.escape(var_name)
+        
+        # patterns that indicate nil checking
+        guard_patterns = [
+            rf'\bif\s+{var_escaped}\s+then\b',           # if var then
+            rf'\bif\s+{var_escaped}\s+and\b',            # if var and ...
+            rf'\bif\s+not\s+{var_escaped}\s+then\b',     # if not var then
+            rf'\bif\s+{var_escaped}\s*~=\s*nil\b',       # if var ~= nil
+            rf'\bif\s+{var_escaped}\s*==\s*nil\s+then\s+return\b',  # if var == nil then return
+            rf'\b{var_escaped}\s+and\s+{var_escaped}[:\.]',  # var and var: or var and var.
+            rf'\bif\s*\(\s*{var_escaped}\s*\)\s*then\b',  # if (var) then
+        ]
+        
+        combined_pattern = re.compile('|'.join(guard_patterns), re.IGNORECASE)
         
         # check lines between assignment and access for nil guard patterns
         for line_num in range(assign_line, access_line):
@@ -1181,20 +1252,8 @@ class ASTAnalyzer:
                 continue
             line_text = self.source_lines[line_num - 1]
             
-            # check for common nil guard patterns
-            # if var then / if var and / if not var then return
-            patterns = [
-                f'if {var_name} then',
-                f'if {var_name} and',
-                f'if not {var_name} then',
-                f'if {var_name} ~= nil',
-                f'if {var_name} == nil then return',
-                f'{var_name} and {var_name}:',
-                f'{var_name} and {var_name}.',
-            ]
-            for pattern in patterns:
-                if pattern in line_text:
-                    return True
+            if combined_pattern.search(line_text):
+                return True
         
         return False
 
@@ -1742,14 +1801,15 @@ class ASTAnalyzer:
                 if loop_scope and concat_info.loop_depth == 1:
                     # look for var = "" or var = '' IMMEDIATELY before the loop
                     # must be: within 3 lines, NOT inside any loop, and must be local declaration
+                    empty_strings = ('""', "''", '[[]]')
                     for assign in self.assigns:
                         if (assign.target == var and 
                             assign.value_type == 'literal' and
-                            assign.value_repr in ('""', "''") and
+                            assign.value_repr in empty_strings and
                             assign.line < loop_scope.start_line and
-                            assign.line >= loop_scope.start_line - 3 and  # must be within 3 lines
-                            not assign.in_loop and  # init must NOT be inside any loop
-                            assign.is_local):  # must be a local declaration
+                            assign.line >= loop_scope.start_line - 3 and
+                            not assign.in_loop and
+                            assign.is_local):
                             init_line = assign.line
                             is_safe = True
                             break

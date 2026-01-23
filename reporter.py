@@ -8,7 +8,7 @@ bruh wish we had Twig :3
 import html
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dataclasses import asdict
 from collections import defaultdict
 from datetime import datetime
@@ -106,8 +106,8 @@ def highlight_code_match(line_content: str, details: dict, pattern_name: str) ->
     return escaped
 
 
-def get_templates_dir() -> Path:
-    """Get path to templates directory."""
+def get_templates_dir() -> Optional[Path]:
+    """Get path to templates directory, or None if not found."""
     module_dir = Path(__file__).parent
     templates_dir = module_dir / "templates"
 
@@ -118,7 +118,7 @@ def get_templates_dir() -> Path:
     if cwd_templates.exists():
         return cwd_templates
 
-    return templates_dir
+    return None
 
 
 class Reporter:
@@ -133,7 +133,7 @@ class Reporter:
         self._jinja_env = None
         if JINJA2_AVAILABLE:
             templates_dir = get_templates_dir()
-            if templates_dir.exists():
+            if templates_dir is not None:
                 self._jinja_env = Environment(
                     loader=FileSystemLoader(str(templates_dir)),
                     autoescape=select_autoescape(['html', 'xml'])
@@ -454,26 +454,39 @@ class Reporter:
         if verbose:
             print("  Preparing template data...", end="", flush=True)
 
-        if self._jinja_env:
-            try:
-                template = self._jinja_env.get_template('report.html')
-                data = self._get_template_data()
+        if not self._jinja_env:
+            if not JINJA2_AVAILABLE:
+                print("\n  Error: Jinja2 not installed. Run: pip install jinja2")
+            else:
+                print("\n  Error: Templates directory not found.")
+            print("  Falling back to JSON format...")
+            json_path = path.with_suffix('.json')
+            self._save_json(json_path, verbose=False)
+            print(f"  Saved as: {json_path}")
+            return
 
-                if verbose:
-                    print("\r  Rendering template...        ", end="", flush=True)
+        try:
+            template = self._jinja_env.get_template('report.html')
+            data = self._get_template_data()
 
-                html_content = template.render(**data)
+            if verbose:
+                print("\r  Rendering template...        ", end="", flush=True)
 
-                if verbose:
-                    print("\r  Writing file...              ", end="", flush=True)
+            html_content = template.render(**data)
 
-                path.write_text(html_content, encoding='utf-8')
+            if verbose:
+                print("\r  Writing file...              ", end="", flush=True)
 
-                if verbose:
-                    print("\r  Done.                        ")
-                return
-            except Exception as e:
-                print(f"\n  Warning: Template rendering failed ({e}), make sure to install Jinja2 and have the templates available.")
+            path.write_text(html_content, encoding='utf-8')
+
+            if verbose:
+                print("\r  Done.                        ")
+        except Exception as e:
+            print(f"\n  Warning: Template rendering failed ({e})")
+            print("  Falling back to JSON format...")
+            json_path = path.with_suffix('.json')
+            self._save_json(json_path, verbose=False)
+            print(f"  Saved as: {json_path}")
 
 def format_details(details: dict) -> str:
     """Format details dict for display."""

@@ -63,6 +63,8 @@ import os
 import argparse
 import shutil
 import zipfile
+import glob
+import traceback
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed, BrokenExecutor
@@ -91,7 +93,8 @@ def analyze_file_worker(args_tuple):
         findings = analyze_file(script_path, cache_threshold=cache_threshold, experimental=experimental)
         return (mod_name, script_path, findings, None)
     except Exception as e:
-        return (mod_name, script_path, [], str(e))
+        err_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        return (mod_name, script_path, [], err_msg)
 
 
 def transform_file_worker(args_tuple):
@@ -110,7 +113,8 @@ def transform_file_worker(args_tuple):
         )
         return (script_path, modified, edit_count, None)
     except Exception as e:
-        return (script_path, False, 0, str(e))
+        err_msg = f"{type(e).__name__}: {e}"
+        return (script_path, False, 0, err_msg)
 
 
 def backup_all_scripts(all_files, output_path=None, mods_root=None, quiet=False):
@@ -284,7 +288,7 @@ def main():
         "--workers", "-j",
         type=int,
         default=None,
-        help="Number of parallel workers for fixes (default: CPU count)"
+        help="Number of parallel workers for fixes (default: CPU count, max 8)"
     )
     parser.add_argument(
         "--revert",
@@ -609,8 +613,6 @@ def main():
     
     # auto-backup on first fix run (safety mechanism)
     if fix_flags_set and not args.no_first_time_auto_backup and not args.backup_all_scripts:
-        # look for existing backup zips in mods folder
-        import glob
         backup_pattern = str(mods_path / "scripts-backup-*.zip")
         existing_backups = glob.glob(backup_pattern)
         
@@ -650,7 +652,16 @@ def main():
             print("Warning: Backup failed, continuing anyway...")
         print()  # blank line after backup
 
-    num_workers = args.workers or min(os.cpu_count() or 4, 8)  # cap at 8 by default
+    # validate and calculate number of workers
+    if args.workers is not None:
+        if args.workers < 1:
+            print(f"Warning: Invalid worker count ({args.workers}), using default")
+            num_workers = min(os.cpu_count() or 4, 8)
+        else:
+            num_workers = min(args.workers, 32)  # cap at reasonable max
+    else:
+        num_workers = min(os.cpu_count() or 4, 8)
+    
     start_time = datetime.now()
 
     if not args.quiet:
@@ -664,23 +675,27 @@ def main():
 
     completed = 0
     pool_crashed = False
+    processed_paths = set()  # track which files were processed
 
     try:
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             futures = {executor.submit(analyze_file_worker, item): item for item in work_items}
 
             for future in as_completed(futures):
-                completed += 1
-
+                item = futures[future]
+                
                 try:
                     mod_name, script_path, findings, error = future.result()
+                    processed_paths.add(script_path)
+                    completed += 1
                 except BrokenExecutor:
                     pool_crashed = True
                     break
                 except Exception as e:
+                    processed_paths.add(item[1])
+                    completed += 1
                     files_skipped += 1
                     if args.verbose:
-                        item = futures[future]
                         print(f"\n  [ERROR] {item[1].name}: {e}")
                     continue
 
@@ -718,8 +733,7 @@ def main():
             print(f"\n\nWorker crashed. Falling back to single-threaded mode...")
 
         # process remaining files sequentially
-        remaining = [(m, s) for m, s in all_files if (m, s, args.timeout) not in
-                     {futures[f] for f in futures if f.done()}] if 'futures' in dir() else all_files[completed:]
+        remaining = [(m, s) for m, s in all_files if s not in processed_paths]
 
         for mod_name, script_path in remaining:
             completed += 1
@@ -749,39 +763,7 @@ def main():
     total_edits = 0
 
     if args.fix or args.fix_debug or args.fix_yellow or args.experimental or args.fix_nil or args.remove_dead_code:
-        # safety: auto-backup on first fix run (unless disabled)
-        if not args.no_first_time_auto_backup:
-            # check if any scripts-backup-*.zip exists in mods folder
-            import glob
-            backup_pattern = str(mods_path / "scripts-backup-*.zip")
-            existing_backups = glob.glob(backup_pattern)
-            
-            if not existing_backups:
-                print("\n" + "=" * 60)
-                print("FIRST-TIME SAFETY BACKUP")
-                print("=" * 60)
-                print("No previous backup found. Creating automatic backup...")
-                print("(Use --no-first-time-auto-backup to skip this in future)\n")
-                
-                backup_result = backup_all_scripts(
-                    all_files,
-                    output_path=None,  # auto-generate name
-                    mods_root=mods_path,
-                    quiet=args.quiet
-                )
-                
-                if backup_result:
-                    print(f"\n✓ Backup created: {backup_result}")
-                    print("=" * 60 + "\n")
-                else:
-                    print("\n✗ Backup failed! Aborting fixes for safety.")
-                    print("  Run with --no-first-time-auto-backup to skip (not recommended)")
-                    sys.exit(1)
-            else:
-                if args.verbose:
-                    print(f"Found existing backup: {existing_backups[0]}")
-        
-        # proceed with fixes
+        # proceed with fixes (auto-backup already handled before analysis)
         fix_msg = "Applying fixes"
         fix_types = []
         if args.fix:
@@ -911,6 +893,7 @@ def main():
                             experimental=args.experimental,
                             fix_nil=args.fix_nil,
                             remove_dead_code=args.remove_dead_code,
+                            cache_threshold=args.cache_threshold,
                         )
                         if modified:
                             files_modified += 1

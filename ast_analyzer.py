@@ -408,10 +408,14 @@ class ASTAnalyzer:
             # Escape special characters for Lua string literal
             # Must re-escape because luaparser stores decoded values
             escaped = s.replace('\\', '\\\\')  # backslash first!
-            escaped = escaped.replace('\n', '\\n')
-            escaped = escaped.replace('\r', '\\r')
-            escaped = escaped.replace('\t', '\\t')
-            escaped = escaped.replace('\0', '\\0')
+            escaped = escaped.replace('\a', '\\a')  # bell
+            escaped = escaped.replace('\b', '\\b')  # backspace
+            escaped = escaped.replace('\f', '\\f')  # form feed
+            escaped = escaped.replace('\n', '\\n')  # newline
+            escaped = escaped.replace('\r', '\\r')  # carriage return
+            escaped = escaped.replace('\t', '\\t')  # tab
+            escaped = escaped.replace('\v', '\\v')  # vertical tab
+            escaped = escaped.replace('\0', '\\0')  # null
             # Choose quote style and escape the chosen quote
             if '"' in escaped and "'" not in escaped:
                 escaped = escaped.replace("'", "\\'")

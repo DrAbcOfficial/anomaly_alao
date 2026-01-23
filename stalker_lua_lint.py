@@ -387,6 +387,16 @@ def main():
         print(f"Error: Path does not exist: {mods_path}")
         sys.exit(1)
 
+    # Auto-detect single file and enable direct mode
+    if mods_path.is_file():
+        if mods_path.suffix.lower() in ('.script', '.lua'):
+            if not args.direct:
+                args.direct = True
+                print(f"Single file detected, using direct mode")
+        else:
+            print(f"Error: File is not a Lua script (.script or .lua): {mods_path}")
+            sys.exit(1)
+
     # discover mods and scripts
     print(f"\nScanning: {mods_path}")
     if args.direct:

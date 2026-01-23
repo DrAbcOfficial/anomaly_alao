@@ -761,6 +761,58 @@ class ASTTransformer:
             priority=50,
         ))
 
+    # More idiomatic cache names for common globals (kinda)
+    IDIOMATIC_CACHE_NAMES = {
+        # math module - use m prefix
+        'math.floor': 'mfloor',
+        'math.ceil': 'mceil',
+        'math.abs': 'mabs',
+        'math.min': 'mmin',
+        'math.max': 'mmax',
+        'math.sqrt': 'msqrt',
+        'math.sin': 'msin',
+        'math.cos': 'mcos',
+        'math.random': 'mrandom',
+        'math.pow': 'mpow',
+        'math.huge': 'mhuge',
+
+        # table module - use t prefix
+        'table.insert': 'tinsert',
+        'table.remove': 'tremove',
+        'table.concat': 'tconcat',
+        'table.sort': 'tsort',
+
+        # string module - use s prefix
+        'string.find': 'sfind',
+        'string.sub': 'ssub',
+        'string.len': 'slen',
+        'string.format': 'sformat',
+        'string.gsub': 'sgsub',
+        'string.match': 'smatch',
+        'string.gmatch': 'sgmatch',
+        'string.lower': 'slower',
+        'string.upper': 'supper',
+
+        # bare globals - use descriptive short names
+        'pairs': 'pairs_',  # trailing underscore to avoid shadowing
+        'ipairs': 'ipairs_',
+        'type': 'type_',
+        'tostring': 'tostr',
+        'tonumber': 'tonum',
+        'print': 'pr',
+        'assert': 'assert_',
+        'error': 'err',
+        'pcall': 'pcall_',
+        'xpcall': 'xpcall_',
+        'next': 'next_',
+        'select': 'sel',
+        'unpack': 'unpack_',
+        'rawget': 'rawget_',
+        'rawset': 'rawset_',
+        'setmetatable': 'setmt',
+        'getmetatable': 'getmt',
+    }
+
     def _edit_uncached_globals(self, finding: Finding):
         """Add local caching for globals at function start."""
         details = finding.details
@@ -775,9 +827,13 @@ class ASTTransformer:
         replacements: Dict[str, str] = {}
 
         for name in sorted(globals_info.keys()):
-            if '.' in name:
+            # use idiomatic name if available, otherwise generate one
+            if name in self.IDIOMATIC_CACHE_NAMES:
+                cache_name = self.IDIOMATIC_CACHE_NAMES[name]
+            elif '.' in name:
                 module, func = name.split('.', 1)
-                cache_name = f'{module}_{func}'
+                # use first letter of module + func name
+                cache_name = f'{module[0]}{func}'
             else:
                 cache_name = f'g_{name}'
 
@@ -788,13 +844,12 @@ class ASTTransformer:
             return
 
         # find insertion point - after function definition line
-        # also handle multi-line function definitions: function name(\n  arg1,\n  arg2)
+        # but handle multi-line function definitions: function name(\n  arg1,\n  arg2)
         func_body_start_line = scope.start_line
         
         func_decl_start, func_decl_end = self._get_line_span(scope.start_line)
         if func_decl_start is not None:
             func_decl_text = self.source[func_decl_start:func_decl_end]
-
             # check if function definition has unclosed paren (multi-line params)
             open_parens = func_decl_text.count('(')
             close_parens = func_decl_text.count(')')
@@ -1004,7 +1059,7 @@ class ASTTransformer:
                     ls, le = self._get_line_span(check_line)
                     if ls is not None:
                         line_text = self.source[ls:le]
-                        # rem comments
+                        # remove comments
                         if '--' in line_text:
                             line_text = line_text[:line_text.find('--')]
                         stripped = line_text.strip().lower()

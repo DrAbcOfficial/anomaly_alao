@@ -731,6 +731,33 @@ class ASTAnalyzer:
                             pass
         return self._get_line(node)
 
+    def _iter_children(self, node):
+        """Iterate over all child nodes of an AST node."""
+        if node is None:
+            return
+        
+        # Handle lists
+        if isinstance(node, list):
+            for item in node:
+                yield item
+            return
+        
+        # For AST nodes, iterate over known child attributes
+        child_attrs = [
+            'body', 'test', 'orelse', 'targets', 'values', 'iter',
+            'func', 'args', 'value', 'idx', 'key', 'left', 'right',
+            'operand', 'fields', 'keys', 'source', 'step', 'start', 'stop',
+        ]
+        
+        for attr in child_attrs:
+            child = getattr(node, attr, None)
+            if child is not None:
+                if isinstance(child, list):
+                    for item in child:
+                        yield item
+                else:
+                    yield child
+
     def _visit_Forin(self, node: Forin):
         """Handle for-in loop."""
         line = self._get_line(node)
@@ -904,6 +931,7 @@ class ASTAnalyzer:
                     )
 
         # check for caching pattern: local xyz = module.func
+        is_new_alias = False
         if len(node.targets) == 1 and len(node.values) == 1:
             target = node.targets[0]
             value = node.values[0]
@@ -922,6 +950,7 @@ class ASTAnalyzer:
                             self.current_scope.cached_globals.add(full_name)
                             # Record alias mapping: target_name -> canonical function name
                             self.current_scope.func_aliases[target_name] = full_name
+                            is_new_alias = True
 
                 # check if caching a bare global
                 elif isinstance(value, Name):
@@ -929,6 +958,13 @@ class ASTAnalyzer:
                         self.current_scope.cached_globals.add(value.id)
                         # Record alias mapping for bare globals too
                         self.current_scope.func_aliases[target_name] = value.id
+                        is_new_alias = True
+                
+                # If NOT creating a new alias, invalidate any existing alias with this name
+                # (e.g., local f = table.insert; local f = other_func)
+                if not is_new_alias:
+                    if target_name in self.current_scope.func_aliases:
+                        del self.current_scope.func_aliases[target_name]
 
                 # record assignment info
                 self._record_assignment(target_name, value, line, is_local=True)
@@ -945,6 +981,11 @@ class ASTAnalyzer:
         for target in node.targets:
             if isinstance(target, Name):
                 self.assignment_target_ids.add(id(target))
+                
+                # Invalidate alias if this variable was an alias
+                # (reassigning breaks the alias relationship)
+                target_name = target.id
+                self._invalidate_alias(target_name)
 
         # check for global writes
         for target in node.targets:
@@ -964,6 +1005,15 @@ class ASTAnalyzer:
         # visit values
         for value in node.values:
             self._visit(value)
+    
+    def _invalidate_alias(self, var_name: str):
+        """Remove alias mapping when a variable is reassigned."""
+        scope = self.current_scope
+        while scope:
+            if var_name in scope.func_aliases:
+                del scope.func_aliases[var_name]
+                return  # Only remove from innermost scope where it exists
+            scope = scope.parent
 
     def _is_in_locals(self, name: str) -> bool:
         """Check if name is in any scope's locals."""
@@ -1807,6 +1857,8 @@ class ASTAnalyzer:
         self._detect_code_after_break()
         self._detect_if_false_blocks()
         self._detect_while_false_loops()
+        self._detect_unnecessary_else()
+        self._detect_constant_conditions()
         
         # Phase 2: Warning patterns (not auto-fixable)
         self._detect_unused_local_vars()
@@ -1999,6 +2051,197 @@ class ASTAnalyzer:
                         },
                         source_line=self._get_source_line(start_line),
                     ))
+
+    def _detect_unnecessary_else(self):
+        """Detect unnecessary else blocks after if blocks that always return/break.
+        
+        Pattern:
+            if condition then
+                return x
+            else            -- This else is unnecessary
+                return y
+            end
+        
+        Can be simplified to:
+            if condition then
+                return x
+            end
+            return y
+        """
+        from luaparser.astnodes import If, ElseIf, Block, Return, Break
+        
+        def block_always_terminates(body) -> bool:
+            """Check if a block always ends with return or break."""
+            if not body:
+                return False
+            
+            # Get the body list
+            if isinstance(body, Block):
+                stmts = body.body if hasattr(body, 'body') else []
+            elif isinstance(body, list):
+                stmts = body
+            else:
+                return False
+            
+            if not stmts:
+                return False
+            
+            # Check if last statement is return or break
+            last_stmt = stmts[-1] if stmts else None
+            return isinstance(last_stmt, (Return, Break))
+        
+        def check_if_node(node: If):
+            """Check an if node for unnecessary else."""
+            if not node.orelse:
+                return  # No else clause
+            
+            # Check if the if body always terminates
+            if not block_always_terminates(node.body):
+                return  # If body doesn't always terminate, else is needed
+            
+            # Get else clause info
+            orelse = node.orelse
+            
+            # Handle elseif chain - check if ALL branches terminate
+            if isinstance(orelse, ElseIf):
+                # For elseif, we need more complex analysis
+                # Skip for now - just handle simple if/else
+                return
+            
+            # Simple else block
+            if isinstance(orelse, Block):
+                else_start = self._get_line(orelse)
+                if_start = self._get_line(node)
+                
+                # Find the 'else' keyword line (should be just before the else block content)
+                # The else block starts at the 'else' keyword
+                else_keyword_line = else_start
+                
+                # Look backwards from else block to find 'else' keyword
+                for search_line in range(else_start, if_start, -1):
+                    line_text = self._get_source_line(search_line)
+                    if line_text and line_text.strip().lower() == 'else':
+                        else_keyword_line = search_line
+                        break
+                
+                self.findings.append(Finding(
+                    pattern_name='unnecessary_else',
+                    severity='YELLOW',  # style suggestion, not auto-fix for now
+                    line_num=else_keyword_line,
+                    message=f'Unnecessary else after return/break - code can be simplified',
+                    details={
+                        'if_line': if_start,
+                        'else_line': else_keyword_line,
+                        'suggestion': 'Remove else and dedent the else body',
+                    },
+                    source_line=self._get_source_line(else_keyword_line),
+                ))
+        
+        def walk(node):
+            """Walk AST looking for if statements."""
+            if isinstance(node, If):
+                check_if_node(node)
+            
+            # Recurse into children
+            for child in self._iter_children(node):
+                walk(child)
+        
+        walk(self._ast_tree)
+
+    def _detect_constant_conditions(self):
+        """Detect if/while statements with constant conditions.
+        
+        Patterns detected:
+        - if 1 then (always true)
+        - if 0 then (always false in Lua? No - 0 is truthy!)
+        - if nil then (always false)
+        - if "string" then (always true)
+        - while true do (intentional infinite loop - skip)
+        - while 1 do (always true)
+        
+        Note: In Lua, only nil and false are falsy. 0, "", etc are truthy.
+        """
+        from luaparser.astnodes import If, While, TrueExpr, FalseExpr, Nil, Number, String
+        
+        def is_constant_truthy(node) -> tuple:
+            """Check if a node is a constant truthy/falsy value.
+            Returns (is_constant, is_truthy, description)
+            """
+            # nil is always falsy
+            if isinstance(node, Nil):
+                return (True, False, 'nil')
+            
+            # false is always falsy
+            if isinstance(node, FalseExpr):
+                return (True, False, 'false')
+            
+            # true is always truthy (but usually intentional)
+            if isinstance(node, TrueExpr):
+                return (True, True, 'true')
+            
+            # Numbers are always truthy (including 0!)
+            if isinstance(node, Number):
+                val = node.n if hasattr(node, 'n') else '?'
+                return (True, True, f'number {val}')
+            
+            # Strings are always truthy (including "")
+            if isinstance(node, String):
+                return (True, True, 'string literal')
+            
+            return (False, None, None)
+        
+        def check_condition(node, node_type: str, line: int):
+            """Check a condition node."""
+            is_const, is_truthy, desc = is_constant_truthy(node)
+            
+            if not is_const:
+                return
+            
+            # Skip "while true do" - this is intentional infinite loop pattern
+            if node_type == 'while' and isinstance(node, TrueExpr):
+                return
+            
+            # Skip "if true then" in some contexts (feature flags, etc.)
+            # Actually, let's report it as it's often a leftover from debugging
+            
+            if is_truthy:
+                if node_type == 'if':
+                    msg = f'Constant condition: if {desc} (always true, else branch is dead code)'
+                else:
+                    msg = f'Constant condition: while {desc} (infinite loop)'
+                severity = 'YELLOW'
+            else:
+                # Always false - this is dead code
+                msg = f'Constant condition: {node_type} {desc} (always false, body is dead code)'
+                severity = 'GREEN'  # Can auto-remove
+            
+            self.findings.append(Finding(
+                pattern_name='constant_condition',
+                severity=severity,
+                line_num=line,
+                message=msg,
+                details={
+                    'node_type': node_type,
+                    'condition_desc': desc,
+                    'is_truthy': is_truthy,
+                },
+                source_line=self._get_source_line(line),
+            ))
+        
+        def walk(node):
+            """Walk AST looking for if/while statements."""
+            if isinstance(node, If):
+                line = self._get_line(node)
+                check_condition(node.test, 'if', line)
+            elif isinstance(node, While):
+                line = self._get_line(node)
+                check_condition(node.test, 'while', line)
+            
+            # Recurse into children
+            for child in self._iter_children(node):
+                walk(child)
+        
+        walk(self._ast_tree)
 
     def _detect_unused_local_vars(self):
         """Detect local variables that are assigned but never read (Phase 2 - warning only).

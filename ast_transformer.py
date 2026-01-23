@@ -186,7 +186,13 @@ class ASTTransformer:
         ))
 
     def _extract_table_insert_value(self, call_text: str, table_name: str) -> Optional[str]:
-        """Extract the value argument from table.insert(t, v) call text."""
+        """Extract the value argument from table.insert(t, v) call text.
+        
+        Handles:
+        - Regular strings: "..." and '...'
+        - Long strings: [[...]] and [=[...]=] (with any number of =)
+        - Nested parentheses, braces, and brackets
+        """
         # find opening paren
         paren_start = call_text.find('(')
         if paren_start == -1:
@@ -202,33 +208,73 @@ class ASTTransformer:
         # find matching closing paren with proper tracking
         depth = 1
         brace_depth = 0
-        bracket_depth = 0
         in_string = False
         string_char = None
+        in_long_string = False
+        long_string_level = 0  # number of = signs in long string delimiter
         i = paren_start + 1
 
         while i < len(call_text) and depth > 0:
             c = call_text[i]
 
-            if not in_string:
-                if c in ('"', "'"):
-                    in_string = True
-                    string_char = c
-                elif c == '(':
-                    depth += 1
-                elif c == ')':
-                    depth -= 1
-                elif c == '{':
-                    brace_depth += 1
-                elif c == '}':
-                    brace_depth -= 1
-                elif c == '[':
-                    bracket_depth += 1
-                elif c == ']':
-                    bracket_depth -= 1
-            else:
-                if c == string_char and (i == 0 or call_text[i - 1] != '\\'):
-                    in_string = False
+            if in_long_string:
+                # Look for closing long string delimiter: ]=*]
+                if c == ']':
+                    # Check if this is the closing delimiter
+                    # Need to match the same number of = signs
+                    if i + 1 + long_string_level < len(call_text):
+                        expected_close = ']' + '=' * long_string_level + ']'
+                        if call_text[i:i + len(expected_close)] == expected_close:
+                            in_long_string = False
+                            i += len(expected_close)
+                            continue
+                i += 1
+                continue
+            
+            if in_string:
+                # Check for escaped quote or end of string
+                if c == string_char:
+                    # Check if escaped (count preceding backslashes)
+                    num_backslashes = 0
+                    j = i - 1
+                    while j >= 0 and call_text[j] == '\\':
+                        num_backslashes += 1
+                        j -= 1
+                    # If even number of backslashes, quote is not escaped
+                    if num_backslashes % 2 == 0:
+                        in_string = False
+                i += 1
+                continue
+
+            # Not in any string - check what we have
+            if c in ('"', "'"):
+                in_string = True
+                string_char = c
+            elif c == '[':
+                # Check for long string start: [=*[
+                # Count = signs
+                eq_count = 0
+                j = i + 1
+                while j < len(call_text) and call_text[j] == '=':
+                    eq_count += 1
+                    j += 1
+                # Check if followed by [
+                if j < len(call_text) and call_text[j] == '[':
+                    # This is a long string
+                    in_long_string = True
+                    long_string_level = eq_count
+                    i = j + 1  # skip past the opening [[
+                    continue
+                # Otherwise it's a regular bracket (for indexing)
+                # Don't track bracket depth - it's handled by context
+            elif c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            elif c == '{':
+                brace_depth += 1
+            elif c == '}':
+                brace_depth -= 1
 
             i += 1
 

@@ -34,7 +34,8 @@ class ASTTransformer:
     def transform_file(self, file_path: Path, backup: bool = True, dry_run: bool = False,
                        fix_debug: bool = False, fix_yellow: bool = False,
                        experimental: bool = False, fix_nil: bool = False,
-                       remove_dead_code: bool = False) -> Tuple[bool, str, int]:
+                       remove_dead_code: bool = False,
+                       cache_threshold: int = 4) -> Tuple[bool, str, int]:
         """
         Transform a file based on findings.
         Returns (was_modified, new_content, edit_count).
@@ -42,6 +43,7 @@ class ASTTransformer:
         Args:
             fix_nil: If True, auto-fix safe nil access patterns
             remove_dead_code: If True, remove 100% safe dead code (after return, if false, etc.)
+            cache_threshold: Minimum call count to trigger caching suggestions (default: 4)
         """
         self.file_path = file_path
         self.edits = []
@@ -49,8 +51,8 @@ class ASTTransformer:
         self.fix_nil = fix_nil
         self.remove_dead_code = remove_dead_code
 
-        # run analyzer
-        self.analyzer = ASTAnalyzer()
+        # run analyzer with user-specified cache_threshold
+        self.analyzer = ASTAnalyzer(cache_threshold=cache_threshold, experimental=experimental)
         findings = self.analyzer.analyze_file(file_path)
 
         # get source from analyzer
@@ -1360,7 +1362,9 @@ class ASTTransformer:
 def transform_file(file_path: Path, backup: bool = True, dry_run: bool = False,
                    fix_debug: bool = False, fix_yellow: bool = False,
                    experimental: bool = False, fix_nil: bool = False,
-                   remove_dead_code: bool = False) -> Tuple[bool, str, int]:
+                   remove_dead_code: bool = False,
+                   cache_threshold: int = 4) -> Tuple[bool, str, int]:
     """Convenience function to transform a file. Returns (modified, content, edit_count)."""
     transformer = ASTTransformer()
-    return transformer.transform_file(file_path, backup, dry_run, fix_debug, fix_yellow, experimental, fix_nil, remove_dead_code)
+    return transformer.transform_file(file_path, backup, dry_run, fix_debug, fix_yellow, 
+                                       experimental, fix_nil, remove_dead_code, cache_threshold)

@@ -96,7 +96,7 @@ def analyze_file_worker(args_tuple):
 
 def transform_file_worker(args_tuple):
     """Worker function for parallel transform_file calls."""
-    script_path, backup, fix_debug, fix_yellow, experimental, fix_nil, remove_dead_code = args_tuple
+    script_path, backup, fix_debug, fix_yellow, experimental, fix_nil, remove_dead_code, cache_threshold = args_tuple
     try:
         modified, _, edit_count = transform_file(
             script_path,
@@ -106,6 +106,7 @@ def transform_file_worker(args_tuple):
             experimental=experimental,
             fix_nil=fix_nil,
             remove_dead_code=remove_dead_code,
+            cache_threshold=cache_threshold,
         )
         return (script_path, modified, edit_count, None)
     except Exception as e:
@@ -808,7 +809,7 @@ def main():
                     print(f"  [SKIP] {script_path.name} - backup already exists")
             else:
                 work_items.append(
-                    (script_path, args.backup, args.fix_debug, args.fix_yellow, args.experimental, args.fix_nil, args.remove_dead_code)
+                    (script_path, args.backup, args.fix_debug, args.fix_yellow, args.experimental, args.fix_nil, args.remove_dead_code, args.cache_threshold)
                 )
         
         if skipped_has_backup > 0 and not args.quiet:

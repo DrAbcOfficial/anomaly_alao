@@ -44,6 +44,14 @@ HOT_CALLBACKS = frozenset({
     'actor_on_item_use',
 })
 
+# Per-frame callbacks detection
+PER_FRAME_CALLBACKS = frozenset({
+    'actor_on_update',
+    'npc_on_update',
+    'monster_on_update',
+    'physic_object_on_update',
+})
+
 # Bare globals that benefit from caching
 CACHEABLE_BARE_GLOBALS = frozenset({
     'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber',
@@ -278,6 +286,19 @@ class LocalVarInfo:
     is_param: bool = False      # is it a function parameter?
 
 
+@dataclass
+class PerFrameCallbackInfo:
+    """Information about a per-frame callback function for performance analysis."""
+    name: str
+    start_line: int
+    end_line: int
+    scope: Scope
+    # Collected during analysis pass
+    expensive_calls: List[CallInfo] = field(default_factory=list)
+    loop_count: int = 0
+    uncached_globals: List[str] = field(default_factory=list)
+
+
 class ASTAnalyzer:
     """AST-based Lua code analyzer."""
 
@@ -358,6 +379,12 @@ class ASTAnalyzer:
             self.callback_registrations.clear()
         else:
             self.callback_registrations: Set[str] = set()
+        
+        # per-frame callback tracking
+        if isinstance(getattr(self, 'per_frame_callbacks', None), list):
+            self.per_frame_callbacks.clear()
+        else:
+            self.per_frame_callbacks: List[PerFrameCallbackInfo] = []
         
         # track Name node IDs that are assignment targets (not reads)
         if isinstance(getattr(self, 'assignment_target_ids', None), set):
@@ -683,9 +710,19 @@ class ASTAnalyzer:
         func_name = self._node_to_string(node.name) if node.name else '<anon>'
 
         is_hot = func_name in HOT_CALLBACKS
+        is_per_frame = func_name in PER_FRAME_CALLBACKS
 
         self.function_depth += 1
         self._enter_scope(func_name, line, 'function', is_hot)
+        
+        # Track per-frame callback for performance analysis
+        if is_per_frame:
+            self.per_frame_callbacks.append(PerFrameCallbackInfo(
+                name=func_name,
+                start_line=line,
+                end_line=-1,  # Will be set on scope exit
+                scope=self.current_scope,
+            ))
 
         # register parameters as locals
         if hasattr(node, 'args') and node.args:
@@ -696,6 +733,11 @@ class ASTAnalyzer:
         self._visit(node.body)
 
         end_line = self._get_end_line(node)
+        
+        # Update end_line for per-frame callback
+        if is_per_frame and self.per_frame_callbacks:
+            self.per_frame_callbacks[-1].end_line = end_line
+        
         self._exit_scope(end_line)
         self.function_depth -= 1
 
@@ -1480,6 +1522,7 @@ class ASTAnalyzer:
         self._analyze_global_writes()
         self._analyze_nil_access()
         self._analyze_dead_code()
+        self._analyze_per_frame_callbacks()
 
     def _analyze_table_insert(self):
         """Find table.insert(t, v) that can be t[#t+1] = v."""
@@ -2370,6 +2413,94 @@ class ASTAnalyzer:
                     },
                     source_line=self._get_source_line(info.assign_line),
                 ))
+
+    def _analyze_per_frame_callbacks(self):
+        """Analyze per-frame callbacks and flag them with performance info.
+        
+        These callbacks run every frame and deserve extra attention:
+        - actor_on_update
+        - npc_on_update
+        - monster_on_update
+        - physic_object_on_update
+        - etc
+        """
+        # Expensive calls that should be avoided or cached in per-frame callbacks
+        EXPENSIVE_CALLS = frozenset({
+            'pairs', 'ipairs', 'string.find', 'string.match', 'string.gmatch',
+            'string.gsub', 'string.format', 'table.sort', 'table.concat',
+            'io.open', 'io.read', 'io.write', 'os.execute',
+            'alife', 'alife_object', 'level.object_by_id', 'simulation_objects',
+            'get_story_object', 'get_object_by_name',
+        })
+        
+        for callback_info in self.per_frame_callbacks:
+            scope = callback_info.scope
+            
+            # gather statistics about the callback
+            calls_in_scope = [c for c in self.calls 
+                            if c.scope is scope or 
+                            (c.scope and c.scope.parent is scope)]
+            
+            # count loops
+            loop_count = sum(1 for s in self.scopes 
+                           if s.scope_type == 'loop' and s.parent is scope)
+            
+            # find expensive calls
+            expensive_calls = []
+            for call in calls_in_scope:
+                if call.full_name in EXPENSIVE_CALLS or call.func in EXPENSIVE_CALLS:
+                    expensive_calls.append(f"{call.full_name} (line {call.line})")
+            
+            # find uncached globals used multiple times
+            global_usage = defaultdict(list)
+            for call in calls_in_scope:
+                if call.full_name in CACHEABLE_BARE_GLOBALS or \
+                   (call.module and call.module in CACHEABLE_MODULE_FUNCS):
+                    global_usage[call.full_name].append(call.line)
+            
+            uncached_globals = []
+            for name, lines in global_usage.items():
+                if len(lines) >= 2 and name not in scope.cached_globals:
+                    uncached_globals.append(f"{name} ({len(lines)}x)")
+            
+            # build message
+            issues = []
+            if loop_count > 0:
+                issues.append(f"{loop_count} loop(s)")
+            if expensive_calls:
+                issues.append(f"{len(expensive_calls)} expensive call(s)")
+            if uncached_globals:
+                issues.append(f"{len(uncached_globals)} uncached global(s)")
+            
+            # determine severity based on issues found
+            if expensive_calls or loop_count > 0:
+                severity = 'RED'
+            elif uncached_globals:
+                severity = 'YELLOW'
+            else:
+                severity = 'DEBUG'
+            
+            # always report per-frame callbacks
+            message = f"Per-frame callback: {callback_info.name} (lines {callback_info.start_line}-{callback_info.end_line})"
+            if issues:
+                message += f" - {', '.join(issues)}"
+            
+            self.findings.append(Finding(
+                pattern_name='per_frame_callback',
+                severity=severity,
+                line_num=callback_info.start_line,
+                message=message,
+                details={
+                    'callback_name': callback_info.name,
+                    'start_line': callback_info.start_line,
+                    'end_line': callback_info.end_line,
+                    'loop_count': loop_count,
+                    'expensive_calls': expensive_calls,
+                    'uncached_globals': uncached_globals,
+                    'total_calls': len(calls_in_scope),
+                },
+                source_line=self._get_source_line(callback_info.start_line),
+            ))
 
     def _get_source_line(self, line_num: int) -> str:
         """Get source line by number."""

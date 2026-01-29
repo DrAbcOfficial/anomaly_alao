@@ -25,6 +25,7 @@ except ImportError:
 # performance impact levels for different patterns (based on real-world benchmarks)
 PERFORMANCE_IMPACT = {
     # CRITICAL - can destroy frame time
+    'per_frame_callback': 'critical',
     'expensive_in_hotpath': 'critical',
     'string_concat_in_loop': 'critical',
 

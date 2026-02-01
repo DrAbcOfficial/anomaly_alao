@@ -26,10 +26,12 @@ except ImportError:
 PERFORMANCE_IMPACT = {
     # CRITICAL - can destroy frame time
     'per_frame_callback': 'critical',
+    'vector_alloc_in_loop': 'critical',
     'expensive_in_hotpath': 'critical',
     'string_concat_in_loop': 'critical',
 
     # HIGH - moderate to high impact in tight loops
+    'distance_to_comparison': 'high',
     'table_insert_append': 'high',
     'math_pow_simple': 'high',
     'string_format_in_loop': 'high',

@@ -161,6 +161,8 @@ class ASTTransformer:
                 self._edit_dead_code(finding)
         elif pattern.startswith('repeated_'):
             self._edit_repeated_calls(finding)
+        elif pattern == 'distance_to_comparison':
+            self._edit_distance_to_comparison(finding)
 
 
     # Edit methods using AST positions
@@ -362,6 +364,54 @@ class ASTTransformer:
             end_char=end,
             replacement=replacement,
         ))
+
+    def _edit_distance_to_comparison(self, finding: Finding):
+        """
+        Convert distance_to() comparison to distance_to_sqr().
+        Comapred values should be replaced with square.
+        
+        Example:
+            pos:distance_to(target) < 10
+        Becomes:
+            pos:distance_to_sqr(target) < 100
+        
+        This avoids the sqrt operation inside distance_to().
+        """
+        invoke_node = finding.details.get('invoke_node')
+        threshold_node = finding.details.get('threshold_node')
+        squared_threshold_str = finding.details.get('squared_threshold_str', '')
+        
+        if not invoke_node or not threshold_node or not squared_threshold_str:
+            return
+        
+        # edit 1: change distance_to to distance_to_sqr in the method name
+        # get the span of the invoke node and find "distance_to" within it
+        invoke_start, invoke_end = self._get_node_span(invoke_node)
+        if invoke_start is not None:
+            invoke_text = self.source[invoke_start:invoke_end]
+            # find ":distance_to(" pattern
+            method_idx = invoke_text.find(':distance_to(')
+            if method_idx != -1:
+                # position of "distance_to" (after the colon)
+                method_name_start = invoke_start + method_idx + 1  # +1 to skip ':'
+                method_name_end = method_name_start + len('distance_to')
+                
+                self.edits.append(SourceEdit(
+                    start_char=method_name_start,
+                    end_char=method_name_end,
+                    replacement='distance_to_sqr',
+                    priority=1,  # apply method name change first
+                ))
+        
+        # edit 2: change the threshold value to its squared version
+        threshold_start, threshold_end = self._get_node_span(threshold_node)
+        if threshold_start is not None:
+            self.edits.append(SourceEdit(
+                start_char=threshold_start,
+                end_char=threshold_end,
+                replacement=squared_threshold_str,
+                priority=0,
+            ))
 
     def _edit_debug_statement(self, finding: Finding):
         """Comment out debug statement (handles multi-line calls)."""

@@ -44,6 +44,14 @@ HOT_CALLBACKS = frozenset({
     'actor_on_item_use',
 })
 
+# Per-frame callbacks detection
+PER_FRAME_CALLBACKS = frozenset({
+    'actor_on_update',
+    'npc_on_update',
+    'monster_on_update',
+    'physic_object_on_update',
+})
+
 # Bare globals that benefit from caching
 CACHEABLE_BARE_GLOBALS = frozenset({
     'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber',
@@ -94,17 +102,26 @@ NIL_RETURNING_FUNCTIONS = {
     'level.object_by_id': 'object is offline or does not exist',
     'level.get_target_obj': 'nothing under crosshair',
     'level.get_target_element': 'nothing under crosshair',
+    'level.get_target_pos': 'nothing under crosshair',
+    'level.vertex_position': 'invalid vertex ID',
+    'level.get_view_entity': 'no view entity set',
     
     # alife functions
     'alife': 'called from main menu or during loading',
     'alife().object': 'object does not exist in simulation',
     'alife():object': 'object does not exist in simulation',
+    'alife().story_object': 'no object with that story_id',
+    'alife():story_object': 'no object with that story_id',
+    'alife().actor': 'actor not spawned yet',
+    'alife():actor': 'actor not spawned yet',
     
     # game object methods that can return nil
     ':parent': 'object has no parent (not in inventory)',
     ':best_enemy': 'no enemy detected',
     ':best_item': 'no item of interest found',
     ':best_danger': 'no danger detected',
+    ':best_weapon': 'no weapon available',
+    ':best_cover': 'no cover available',
     ':active_item': 'no weapon/item currently equipped',
     ':active_detector': 'no detector currently active',
     ':object': 'item not in inventory or index out of bounds',
@@ -119,10 +136,21 @@ NIL_RETURNING_FUNCTIONS = {
     ':get_physics_shell': 'object has no physics shell',
     ':spawn_ini': 'no spawn ini defined',
     ':motivation_action_manager': 'not an NPC with action manager',
+    ':get_current_holder': 'not in a vehicle/turret',
+    ':get_old_holder': 'was not in a vehicle/turret',
+    ':memory_position': 'object never seen',
+    ':get_dest_enemy': 'no destination enemy',
+    ':bone_id': 'bone name does not exist',
+    ':bone_position': 'bone does not exist',
+    ':bone_direction': 'bone does not exist',
     
     # common patterns
     'db.actor': 'called from main menu or during loading',
     'db.storage': 'storage not initialized',  # db.storage[id] can be nil
+    
+    # story object helpers
+    'get_story_object': 'no object with that story_id',
+    'get_object_by_name': 'object not found or offline',
 }
 
 # Method patterns that indicate the variable is being nil-checked
@@ -278,6 +306,42 @@ class LocalVarInfo:
     is_param: bool = False      # is it a function parameter?
 
 
+@dataclass
+class PerFrameCallbackInfo:
+    """Information about a per-frame callback function for performance analysis."""
+    name: str
+    start_line: int
+    end_line: int
+    scope: Scope
+    # Collected during analysis pass
+    expensive_calls: List[CallInfo] = field(default_factory=list)
+    loop_count: int = 0
+    uncached_globals: List[str] = field(default_factory=list)
+
+
+@dataclass
+class DistanceComparisonInfo:
+    """Information about distance_to() used in comparison (can be optimized to distance_to_sqr())."""
+    line: int
+    source_obj: str          # the object calling distance_to (e.g., "pos", "actor:position()")
+    target_obj: str          # the argument to distance_to (e.g., "target_pos")
+    comparison_op: str       # '<', '<=', '>', '>='
+    threshold_value: float   # the numeric threshold (e.g., 10)
+    threshold_node: Node     # the AST node for the threshold (for replacement)
+    full_node: Node          # the full comparison node
+    invoke_node: Node        # the distance_to invoke node
+
+
+@dataclass
+class VectorAllocationInfo:
+    """Information about vector() allocation in a loop."""
+    line: int
+    call_node: Node
+    loop_depth: int
+    scope: Scope
+    in_per_frame_callback: bool = False
+
+
 class ASTAnalyzer:
     """AST-based Lua code analyzer."""
 
@@ -358,6 +422,24 @@ class ASTAnalyzer:
             self.callback_registrations.clear()
         else:
             self.callback_registrations: Set[str] = set()
+        
+        # per-frame callback tracking
+        if isinstance(getattr(self, 'per_frame_callbacks', None), list):
+            self.per_frame_callbacks.clear()
+        else:
+            self.per_frame_callbacks: List[PerFrameCallbackInfo] = []
+        
+        # distance_to comparison tracking
+        if isinstance(getattr(self, 'distance_comparisons', None), list):
+            self.distance_comparisons.clear()
+        else:
+            self.distance_comparisons: List[DistanceComparisonInfo] = []
+        
+        # vector allocation tracking
+        if isinstance(getattr(self, 'vector_allocations', None), list):
+            self.vector_allocations.clear()
+        else:
+            self.vector_allocations: List[VectorAllocationInfo] = []
         
         # track Name node IDs that are assignment targets (not reads)
         if isinstance(getattr(self, 'assignment_target_ids', None), set):
@@ -683,9 +765,19 @@ class ASTAnalyzer:
         func_name = self._node_to_string(node.name) if node.name else '<anon>'
 
         is_hot = func_name in HOT_CALLBACKS
+        is_per_frame = func_name in PER_FRAME_CALLBACKS
 
         self.function_depth += 1
         self._enter_scope(func_name, line, 'function', is_hot)
+        
+        # Track per-frame callback for performance analysis
+        if is_per_frame:
+            self.per_frame_callbacks.append(PerFrameCallbackInfo(
+                name=func_name,
+                start_line=line,
+                end_line=-1,  # Will be set on scope exit
+                scope=self.current_scope,
+            ))
 
         # register parameters as locals
         if hasattr(node, 'args') and node.args:
@@ -696,6 +788,11 @@ class ASTAnalyzer:
         self._visit(node.body)
 
         end_line = self._get_end_line(node)
+        
+        # Update end_line for per-frame callback
+        if is_per_frame and self.per_frame_callbacks:
+            self.per_frame_callbacks[-1].end_line = end_line
+        
         self._exit_scope(end_line)
         self.function_depth -= 1
 
@@ -1337,6 +1434,25 @@ class ASTAnalyzer:
                 callback_func = self._node_to_string(node.args[1])
                 if callback_func:
                     self.callback_registrations.add(callback_func)
+            
+            # Track vector() allocations in loops
+            if full_name == 'vector' and self.loop_depth > 0:
+                # check if we're inside a per-frame callback
+                in_per_frame = False
+                scope = self.current_scope
+                while scope:
+                    if scope.is_hot_callback:
+                        in_per_frame = True
+                        break
+                    scope = scope.parent
+                
+                self.vector_allocations.append(VectorAllocationInfo(
+                    line=line,
+                    call_node=node,
+                    loop_depth=self.loop_depth,
+                    scope=self.current_scope,
+                    in_per_frame_callback=in_per_frame,
+                ))
 
         # visit children
         self._visit(node.func)
@@ -1422,12 +1538,74 @@ class ASTAnalyzer:
     def _visit_ExpoOp(self, node): self._visit(node.left); self._visit(node.right)
     def _visit_AndLoOp(self, node): self._visit(node.left); self._visit(node.right)
     def _visit_OrLoOp(self, node): self._visit(node.left); self._visit(node.right)
-    def _visit_LessThanOp(self, node): self._visit(node.left); self._visit(node.right)
-    def _visit_GreaterThanOp(self, node): self._visit(node.left); self._visit(node.right)
-    def _visit_LessOrEqThanOp(self, node): self._visit(node.left); self._visit(node.right)
-    def _visit_GreaterOrEqThanOp(self, node): self._visit(node.left); self._visit(node.right)
     def _visit_EqToOp(self, node): self._visit(node.left); self._visit(node.right)
     def _visit_NotEqToOp(self, node): self._visit(node.left); self._visit(node.right)
+    
+    def _visit_LessThanOp(self, node):
+        self._check_distance_comparison(node, '<')
+        self._visit(node.left)
+        self._visit(node.right)
+    
+    def _visit_GreaterThanOp(self, node):
+        self._check_distance_comparison(node, '>')
+        self._visit(node.left)
+        self._visit(node.right)
+    
+    def _visit_LessOrEqThanOp(self, node):
+        self._check_distance_comparison(node, '<=')
+        self._visit(node.left)
+        self._visit(node.right)
+    
+    def _visit_GreaterOrEqThanOp(self, node):
+        self._check_distance_comparison(node, '>=')
+        self._visit(node.left)
+        self._visit(node.right)
+    
+    def _check_distance_comparison(self, node, op: str):
+        """Check if this comparison involves distance_to() that could use distance_to_sqr()."""
+        # Pattern: obj:distance_to(target) < N  or  N > obj:distance_to(target)
+        invoke_node = None
+        threshold_node = None
+        
+        # check left side for distance_to invoke
+        if isinstance(node.left, Invoke):
+            func_name = node.left.func.id if isinstance(node.left.func, Name) else None
+            if func_name == 'distance_to':
+                invoke_node = node.left
+                threshold_node = node.right
+        
+        # check right side for distance_to invoke (reversed comparison)
+        if invoke_node is None and isinstance(node.right, Invoke):
+            func_name = node.right.func.id if isinstance(node.right.func, Name) else None
+            if func_name == 'distance_to':
+                invoke_node = node.right
+                threshold_node = node.left
+                # Reverse the operator for analysis
+                op = {'<': '>', '>': '<', '<=': '>=', '>=': '<='}[op]
+        
+        if invoke_node is None:
+            return
+        
+        # check if threshold is a numeric literal
+        if not isinstance(threshold_node, Number):
+            return
+        
+        threshold_value = threshold_node.n
+        
+        # extract source and target
+        source_obj = self._node_to_string(invoke_node.source)
+        target_obj = self._node_to_string(invoke_node.args[0]) if invoke_node.args else ""
+        
+        self.distance_comparisons.append(DistanceComparisonInfo(
+            line=self._get_line(node),
+            source_obj=source_obj,
+            target_obj=target_obj,
+            comparison_op=op,
+            threshold_value=threshold_value,
+            threshold_node=threshold_node,
+            full_node=node,
+            invoke_node=invoke_node,
+        ))
 
     # unary ops
     def _visit_UMinusOp(self, node): self._visit(node.operand)
@@ -1480,6 +1658,9 @@ class ASTAnalyzer:
         self._analyze_global_writes()
         self._analyze_nil_access()
         self._analyze_dead_code()
+        self._analyze_per_frame_callbacks()
+        self._analyze_distance_to_comparisons()
+        self._analyze_vector_allocations_in_loops()
 
     def _analyze_table_insert(self):
         """Find table.insert(t, v) that can be t[#t+1] = v."""
@@ -2370,6 +2551,188 @@ class ASTAnalyzer:
                     },
                     source_line=self._get_source_line(info.assign_line),
                 ))
+
+    def _analyze_per_frame_callbacks(self):
+        """Analyze per-frame callbacks and flag them with performance info.
+        
+        These callbacks run every frame and deserve extra attention:
+        - actor_on_update
+        - npc_on_update
+        - monster_on_update
+        - physic_object_on_update
+        - etc
+        """
+        # Expensive calls that should be avoided or cached in per-frame callbacks
+        EXPENSIVE_CALLS = frozenset({
+            'pairs', 'ipairs', 'string.find', 'string.match', 'string.gmatch',
+            'string.gsub', 'string.format', 'table.sort', 'table.concat',
+            'io.open', 'io.read', 'io.write', 'os.execute',
+            'alife', 'alife_object', 'level.object_by_id', 'simulation_objects',
+            'get_story_object', 'get_object_by_name',
+        })
+        
+        for callback_info in self.per_frame_callbacks:
+            scope = callback_info.scope
+            
+            # gather statistics about the callback
+            calls_in_scope = [c for c in self.calls 
+                            if c.scope is scope or 
+                            (c.scope and c.scope.parent is scope)]
+            
+            # count loops
+            loop_count = sum(1 for s in self.scopes 
+                           if s.scope_type == 'loop' and s.parent is scope)
+            
+            # find expensive calls
+            expensive_calls = []
+            for call in calls_in_scope:
+                if call.full_name in EXPENSIVE_CALLS or call.func in EXPENSIVE_CALLS:
+                    expensive_calls.append(f"{call.full_name} (line {call.line})")
+            
+            # find uncached globals used multiple times
+            global_usage = defaultdict(list)
+            for call in calls_in_scope:
+                if call.full_name in CACHEABLE_BARE_GLOBALS or \
+                   (call.module and call.module in CACHEABLE_MODULE_FUNCS):
+                    global_usage[call.full_name].append(call.line)
+            
+            uncached_globals = []
+            for name, lines in global_usage.items():
+                if len(lines) >= 2 and name not in scope.cached_globals:
+                    uncached_globals.append(f"{name} ({len(lines)}x)")
+            
+            # build message
+            issues = []
+            if loop_count > 0:
+                issues.append(f"{loop_count} loop(s)")
+            if expensive_calls:
+                issues.append(f"{len(expensive_calls)} expensive call(s)")
+            if uncached_globals:
+                issues.append(f"{len(uncached_globals)} uncached global(s)")
+            
+            # determine severity based on issues found
+            if expensive_calls or loop_count > 0:
+                severity = 'RED'
+            elif uncached_globals:
+                severity = 'YELLOW'
+            else:
+                severity = 'DEBUG'
+            
+            # always report per-frame callbacks
+            message = f"Per-frame callback: {callback_info.name} (lines {callback_info.start_line}-{callback_info.end_line})"
+            if issues:
+                message += f" - {', '.join(issues)}"
+            
+            self.findings.append(Finding(
+                pattern_name='per_frame_callback',
+                severity=severity,
+                line_num=callback_info.start_line,
+                message=message,
+                details={
+                    'callback_name': callback_info.name,
+                    'start_line': callback_info.start_line,
+                    'end_line': callback_info.end_line,
+                    'loop_count': loop_count,
+                    'expensive_calls': expensive_calls,
+                    'uncached_globals': uncached_globals,
+                    'total_calls': len(calls_in_scope),
+                },
+                source_line=self._get_source_line(callback_info.start_line),
+            ))
+
+    # @TODO: Check distance_to() implementation in xray source code more thoroughly
+    def _analyze_distance_to_comparisons(self):
+        """
+        Find distance_to() calls in comparisons that can use distance_to_sqr() instead.
+        Should replace compared value with its square too.
+        
+        Pattern: pos:distance_to(target) < 10
+        Optimized: pos:distance_to_sqr(target) < 100  -- (10^2, avoids sqrt)
+        
+        This is auto-fixable and provides performance improvement
+        since distance_to() requires a square root operation.
+        """
+        for comp in self.distance_comparisons:
+            squared_threshold = comp.threshold_value ** 2
+            
+            # format the squared value nicely
+            if squared_threshold == int(squared_threshold):
+                squared_str = str(int(squared_threshold))
+            else:
+                squared_str = f"{squared_threshold:.6g}"
+            
+            original = f"{comp.source_obj}:distance_to({comp.target_obj}) {comp.comparison_op} {comp.threshold_value}"
+            optimized = f"{comp.source_obj}:distance_to_sqr({comp.target_obj}) {comp.comparison_op} {squared_str}"
+            
+            self.findings.append(Finding(
+                pattern_name='distance_to_comparison',
+                severity='GREEN',  # Auto-fixable
+                line_num=comp.line,
+                message=f'Use distance_to_sqr() to avoid sqrt: {original} -> {optimized}',
+                details={
+                    'source_obj': comp.source_obj,
+                    'target_obj': comp.target_obj,
+                    'comparison_op': comp.comparison_op,
+                    'original_threshold': comp.threshold_value,
+                    'squared_threshold': squared_threshold,
+                    'squared_threshold_str': squared_str,
+                    'invoke_node': comp.invoke_node,
+                    'threshold_node': comp.threshold_node,
+                    'full_node': comp.full_node,
+                },
+                source_line=self._get_source_line(comp.line),
+            ))
+
+    def _analyze_vector_allocations_in_loops(self):
+        """
+        Find vector() allocations inside loops.
+        
+        Each vector() call allocates memory that must be garbage collected.
+        In loops, especially in per-frame callbacks, this can cause significant
+        GC pressure and frame drops.
+        
+        Solution: Pre-allocate vectors at module level and reuse with :set()
+        
+        Example:
+            -- Bad: allocates every iteration
+            for i = 1, 100 do
+                local pos = vector():set(x, y, z)
+            end
+            
+            -- Good: reuse pre-allocated vector
+            local temp_vec = vector()  -- at module level
+            for i = 1, 100 do
+                temp_vec:set(x, y, z)
+            end
+        
+        NOT auto-fixable because it requires:
+        1. Moving allocation to module/function level
+        2. Understanding which vectors can be safely reused
+        3. Ensuring no aliasing issues
+        """
+        for alloc in self.vector_allocations:
+            severity = 'RED'
+            
+            context = ""
+            if alloc.in_per_frame_callback:
+                context = " in per-frame callback"
+            if alloc.loop_depth > 1:
+                context += f" (nested {alloc.loop_depth} loops deep)"
+            
+            message = f"vector() allocation in loop{context} - pre-allocate and reuse with :set()"
+            
+            self.findings.append(Finding(
+                pattern_name='vector_alloc_in_loop',
+                severity=severity,
+                line_num=alloc.line,
+                message=message,
+                details={
+                    'loop_depth': alloc.loop_depth,
+                    'in_per_frame_callback': alloc.in_per_frame_callback,
+                    'node': alloc.call_node,
+                },
+                source_line=self._get_source_line(alloc.line),
+            ))
 
     def _get_source_line(self, line_num: int) -> str:
         """Get source line by number."""

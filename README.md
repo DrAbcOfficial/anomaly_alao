@@ -108,7 +108,6 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 | Pattern | Description | Impact |
 |---------|-------------|--------|
 | `s = s .. x` in loop | String concatenation builds O(n²) garbage | Critical |
-| `vector()` in hot loop | Allocates new vector each iteration | Critical |
 
 
 ### RED (info only (for modders), no auto-fix)
@@ -117,6 +116,7 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 |---------|-------------|
 | Global variable writes | Writing to global scope (potential pollution) |
 | Per-frame callback warnings | Performance issues in `actor_on_update`, etc. |
+| `vector()` in hot loop | Allocates new vector each iteration | Critical |
 | Constant conditions | `if true then` / `if false then` |
 | Unnecessary else | `if x then return end else ...` |
 

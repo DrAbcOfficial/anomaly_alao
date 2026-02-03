@@ -227,7 +227,7 @@ def main():
     parser.add_argument(
         "--experimental",
         action="store_true",
-        help="Enable experimental features: string concat in loops + branch-aware call counting (ignores mutually exclusive if/elseif branches)"
+        help="Enable experimental features: string concat in loops auto-fix"
     )
     parser.add_argument(
         "--cache-threshold",

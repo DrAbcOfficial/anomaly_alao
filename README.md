@@ -105,6 +105,8 @@ _Notice a decreased frame time and AVG FPS increase. Keep in mind this was teste
 
 ### YELLOW (may cause CTDs, fix with `--fix-yellow`)
 
+Pay attention some of this fixes requires `--experimental` flag.
+
 | Pattern | Description | Impact |
 |---------|-------------|--------|
 | `s = s .. x` in loop | String concatenation builds O(n²) garbage | Critical |

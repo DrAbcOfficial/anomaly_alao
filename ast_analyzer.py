@@ -1769,7 +1769,7 @@ class ASTAnalyzer:
     
     def _count_calls_branch_aware(self, calls: List[CallInfo]) -> int:
         """
-        Count function calls with branch awareness in experimental mode.
+        Count function calls with branch awareness.
         
         In mutually exclusive if/elseif/else chains, only count the max calls
         in any single branch (not the sum across all branches).
@@ -1777,9 +1777,9 @@ class ASTAnalyzer:
         Standard count: 3 uses
         Branch-aware count: max(1, 2) = 2 uses (only one branch executes)
         """
-        if not self.experimental:
-            # standard counting: total calls
-            return len(calls)
+        # if not self.experimental:
+        #     # standard counting: total calls
+        #     return len(calls)
         
         # group calls by if-chain (use id(node) as key since nodes aren't hashable)
         if_chains: Dict[Optional[int], Dict[int, List[CallInfo]]] = defaultdict(lambda: defaultdict(list))
